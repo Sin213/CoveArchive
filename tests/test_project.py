@@ -45,7 +45,7 @@ def test_pyproject_bootstrap_contract():
     assert project["requires-python"] == ">=3.12"
     assert project["license"] == "MIT"
     assert project["license-files"] == ["LICENSE"]
-    assert project["dependencies"] == []
+    assert project["dependencies"] == ["requests>=2.32,<3"]
     assert project["optional-dependencies"]["test"] == ["pytest>=8"]
     assert project["readme"] == "README.md"
     assert isinstance(project["description"], str)
@@ -174,6 +174,14 @@ def test_source_imports_are_stdlib_or_own_package_only():
                 continue
             for module in modules:
                 root = module.split(".")[0]
-                assert root in sys.stdlib_module_names or root == "covearchive", (
+                assert (
+                    root in sys.stdlib_module_names
+                    or root == "covearchive"
+                    or (
+                        root == "requests"
+                        and path.relative_to(ROOT).as_posix()
+                        == "src/covearchive/github/client.py"
+                    )
+                ), (
                     path.relative_to(ROOT), node.lineno, module
                 )

@@ -14,7 +14,7 @@ The URL parser classifies supported targets, and the format matcher identifies
 supported asset suffixes. An offline test suite covers both components.
 
 There is no release discovery, downloading, archive management, or user interface
-in this slice. The package has no runtime dependencies.
+in this slice. Backend release discovery (CA-S2) is available as library code without UI, downloads, or persistence; its only runtime dependency is requests (>=2.32,<3). Explicit tag selection requires a complete release scan.
 
 ## GitHub URL classification
 
