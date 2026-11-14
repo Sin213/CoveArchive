@@ -235,7 +235,9 @@ def _next_url(header, current):
         return None
     parts = _api_url(url, PaginationError)
     previous = urlsplit(current)
-    if parts.path != previous.path:
+    if parts.path != previous.path and not (
+            re.fullmatch(r"/repos/[^/]+/[^/]+/releases", previous.path)
+            and re.fullmatch(r"/repositories/[0-9]{1,20}/releases", parts.path)):
         raise PaginationError()
     try:
         if "%" in parts.query or "+" in parts.query:

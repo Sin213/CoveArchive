@@ -6,15 +6,31 @@ they control, with an index that can support later verification and rescanning.
 
 ## Status
 
-**pre-alpha, slice CA-S1**
+**pre-alpha, slice CA-S3** — Windows-first native PySide6 release scanner GUI.
 
 The scope of this slice is project bootstrap, a GitHub URL classifier, and a
 release-asset format matcher. These are the foundations for the planned workflow.
 The URL parser classifies supported targets, and the format matcher identifies
 supported asset suffixes. An offline test suite covers both components.
 
-There is no release discovery, downloading, archive management, or user interface
-in this slice. Backend release discovery (CA-S2) is available as library code without UI, downloads, or persistence; its only runtime dependency is requests (>=2.32,<3). Explicit tag selection requires a complete release scan.
+The GUI uses CA-S2 release discovery through the official GitHub REST API. Expand
+releases to inspect all assets; format and prerelease filters run locally. Release
+notes are not shown. There are no downloads, SQLite, or archive writes yet.
+
+Python 3.12+, requests (>=2.32,<3), and PySide6 (>=6.11,<7) are required. From the
+source tree, launch `python run_covearchive.py`. The developer diagnostic
+`python run_covearchive.py --smoke-test` opens the window, processes events, and exits.
+
+Paste a repository or `/releases` URL, then Scan (or press Enter). Tag URLs are not
+supported in the UI. Cancel Scan kills and reaps the separate worker process.
+A 180 s hard deadline also kills it: very large repositories report **Timed out**,
+never a partial listing. The message reads "Timed out after 180 seconds; try again".
+Errors retain the URL so you can rescan without restart.
+Unauthenticated GitHub API rate limits apply; retry guidance uses backend fields.
+The GUI never makes synchronous network requests. A worker watchdog also exits on
+parent-pipe EOF or its own deadline, guarding against Windows Python redirectors
+that might otherwise leave a grandchild behind. This is a Windows-first source
+launcher; frozen packaging and other operating systems are not validated here.
 
 ## GitHub URL classification
 
@@ -47,7 +63,8 @@ Unicode characters resembling ASCII extension letters are not accepted.
 
 ## FUTURE workflow — not implemented
 
-The following workflow is planned and is not available in CA-S1:
+Discovery and filtering are available. Destination selection, downloads and archive
+management in the following workflow are FUTURE, not implemented:
 
 1. Paste a GitHub repository or releases URL.
 2. Discover releases through the official GitHub REST API.

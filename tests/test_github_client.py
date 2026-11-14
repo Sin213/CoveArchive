@@ -167,6 +167,61 @@ def test_three_pages_order_duplicates_and_no_guessed_next(rig):
     assert [c["url"] for c in session.calls] == [URL, page(2), page(5)]
 
 
+@pytest.mark.parametrize("redirect", [None, "/repositories/571770/releases", "/repos/New/Name/releases"])
+def test_B1_named_to_numeric_pagination(rig, redirect):
+    numeric = "/repositories/571770/releases"
+    script = ([FakeResponse(302, headers={"Location": redirect})] if redirect else []) + [
+        FakeResponse(body=[release(1)], headers={"Link": link(page(2, numeric))}),
+        FakeResponse(body=[release(2)], headers={"Link": link(page(3, numeric))}),
+        FakeResponse(body=[release(3)])]
+    client, session, _ = rig(script)
+    try: result = discover(client)
+    except GitHubApiError as exc: pytest.fail(f"Valid numeric pagination rejected: {exc.code}")
+    assert [r.id for r in result.releases] == [1, 2, 3]
+    assert (result.pages, result.requests, result.redirects) == (3, 3 + bool(redirect), bool(redirect))
+    assert [c["url"] for c in session.calls] == [URL] + (
+        [ROOT + redirect + "?per_page=100"] if redirect else []) + [page(2, numeric), page(3, numeric)]
+
+
+def test_B1_exact_pandoc_link_shape(rig):
+    header = ('<https://api.github.com/repositories/571770/releases?per_page=100&page=2>; rel="next", '
+              '<https://api.github.com/repositories/571770/releases?per_page=100&page=2>; rel="last"')
+    client, session, _ = rig([FakeResponse(body=[release(1)], headers={"Link": header}),
+                              FakeResponse(body=[release(2)])])
+    try: result = discover(client, RepositoryTarget("jgm", "pandoc"))
+    except GitHubApiError as exc: pytest.fail(f"Real header shape rejected: {exc.code}")
+    assert [r.id for r in result.releases] == [1, 2] and result.requests == 2
+    assert [c["url"] for c in session.calls] == [
+        ROOT + "/repos/jgm/pandoc/releases?per_page=100", page(2, "/repositories/571770/releases")]
+
+
+@pytest.mark.parametrize("stage", ["named", "redirected", "switched"])
+@pytest.mark.parametrize("bad", ["/repositories/abc/releases", "/repositories/"+"1"*21+"/releases",
+    "/repositories/1/issues", "/repositories/1/releases/extra", "/repos/Other/Repo/releases"])
+def test_B1_reject_unrelated_next_paths(rig, stage, bad):
+    numeric = "/repositories/571770/releases"
+    prefix = ([FakeResponse(302, headers={"Location": numeric})] if stage == "redirected" else
+              [FakeResponse(headers={"Link": link(page(2, numeric))})] if stage == "switched" else [])
+    client, session, _ = rig(prefix + [FakeResponse(headers={"Link": link(page(3 if stage == "switched" else 2, bad))})])
+    late = stage == "switched"
+    exc = error(client, IncompleteScanError if late else PaginationError, "incomplete_scan" if late else "bad_pagination")
+    assert isinstance(exc.cause if late else exc, PaginationError)
+    assert len(session.calls) == len(prefix) + 1
+
+
+@pytest.mark.parametrize("stage", ["redirected", "switched"])
+@pytest.mark.parametrize("bad", ["/repositories/571771/releases", PATH])
+def test_B1_numeric_id_is_pinned(rig, stage, bad):
+    numeric = "/repositories/571770/releases"
+    prefix = FakeResponse(302, headers={"Location": numeric}) if stage == "redirected" else FakeResponse(headers={"Link": link(page(2,numeric))})
+    client, session, _ = rig([prefix, FakeResponse(headers={"Link": link(page(3,bad))})])
+    try: discover(client)
+    except GitHubApiError as exc:
+        assert isinstance(exc.cause if stage == "switched" else exc, PaginationError)
+    else: pytest.fail("Unpinned numeric pagination accepted")
+    assert len(session.calls) == 2
+
+
 @pytest.mark.parametrize("header", ["garbage", "<broken", "x" * 8193,
     link(page(2)) + ", " + link(page(3)), '<https://api.github.com/x>; nope',
     link("https://evil.test" + PATH + "?page=2"), link("http://api.github.com" + PATH + "?page=2"),

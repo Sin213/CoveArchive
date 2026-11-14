@@ -25,6 +25,14 @@ ALLOWLIST = (
     "tests/test_urls.py",
     "tests/test_formats.py",
     "tests/test_project.py",
+    "run_covearchive.py",
+    "src/covearchive/scan_worker.py",
+    "src/covearchive/ui/__init__.py",
+    "src/covearchive/ui/window.py",
+    "src/covearchive/ui/scan_process.py",
+    "tests/test_scan_worker.py",
+    "tests/test_scan_process.py",
+    "tests/test_ui_window.py",
 )
 
 
@@ -45,7 +53,7 @@ def test_pyproject_bootstrap_contract():
     assert project["requires-python"] == ">=3.12"
     assert project["license"] == "MIT"
     assert project["license-files"] == ["LICENSE"]
-    assert project["dependencies"] == ["requests>=2.32,<3"]
+    assert project["dependencies"] == ["requests>=2.32,<3", "PySide6>=6.11,<7"]
     assert project["optional-dependencies"]["test"] == ["pytest>=8"]
     assert project["readme"] == "README.md"
     assert isinstance(project["description"], str)
@@ -84,7 +92,7 @@ def test_allowlisted_files_exist_are_utf8_and_use_lf(relative_path):
     "statement",
     [
         "local preservation of GitHub project releases",
-        "pre-alpha, slice CA-S1",
+        "pre-alpha, slice CA-S3",
         "bootstrap",
         "URL classifier",
         "format matcher",
@@ -137,6 +145,8 @@ def test_imports_succeed_when_optional_third_party_modules_are_blocked():
             "assert 'covearchive.github.urls' not in sys.modules",
             "import covearchive.formats",
             "import covearchive.github.urls",
+            "import covearchive.github.models, covearchive.github.select",
+            "import covearchive.scan_worker, covearchive.ui",
             "for module in (covearchive, covearchive.formats, covearchive.github.urls):",
             "    assert Path(module.__file__).resolve().is_relative_to(src)",
             "assert sys.modules['requests'] is None",
@@ -177,6 +187,7 @@ def test_source_imports_are_stdlib_or_own_package_only():
                 assert (
                     root in sys.stdlib_module_names
                     or root == "covearchive"
+                    or (root == "PySide6" and path.parent == ROOT / "src/covearchive/ui")
                     or (
                         root == "requests"
                         and path.relative_to(ROOT).as_posix()
@@ -185,3 +196,18 @@ def test_source_imports_are_stdlib_or_own_package_only():
                 ), (
                     path.relative_to(ROOT), node.lineno, module
                 )
+
+
+def test_new_modules_have_no_dynamic_imports_and_backend_has_no_qt():
+    for relative in ALLOWLIST:
+        if relative.endswith(".py") and ("/ui/" in relative or "scan_worker" in relative or relative == "run_covearchive.py"):
+            tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    assert node.func.id not in ("__import__", "import_module")
+    script = ("import sys;sys.path.insert(0,sys.argv[1]);sys.modules['PySide6']=None;"
+              "import covearchive.formats,covearchive.github.urls,covearchive.github.models,"
+              "covearchive.github.select,covearchive.github.client;assert sys.modules['PySide6'] is None")
+    result = subprocess.run([sys.executable,"-I","-B","-c",script,str(ROOT/"src")],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
