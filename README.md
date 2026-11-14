@@ -148,6 +148,16 @@ to mirror every part of a GitHub project.
 
 As a design rule, downloads are never automatically executed or extracted.
 
+## CA-S6: managed aria2 transfer engine
+
+The standalone backend owns an unprivileged aria2 1.37.x child: authenticated loopback-only RPC, TCP-table PID ownership proof, and a secret only in memory and an ACL-verified private config, never arguments. Its minimal environment strips proxies; no proxy support. Defaults: 2 active, 4 connections, unlimited bandwidth.
+Strict `.part` names stay in work_dir: no overwrite, automatic rename, transfer-data deletion, archive publication or manifest writes. Only the final work_dir component is checked for reparse points; CA-S7's verified staging directory owns ancestry.
+Explicit resume requires expected size and regular data/control files. aria2 cannot detect same-size changed content or tampered/truncated partials. If-Range helps; CA-S7 MUST fully hash every completed download. Completion is transport only, never local/publisher verification.
+aria2 follows cross-origin redirects; no redirect-host enforcement is claimed. CA-S7 must probe with its own no-follow client, submit the approved URL, audit `currentUri`, and separately probe Retry-After (unavailable through aria2).
+No engine retries/backoff. CA-S8 owns optional 1-5 s start jitter (default off), server cooldowns, bounded exponential backoff with jitter, and no bot-detection evasion.
+Queue persistence, GUI integration, secure URL resolution, hashing and archive publication remain FUTURE. CA-S5.1 carryovers F3, L2 and F1 are untouched and NOT fixed. Real disk-full is not verified; real file-I/O is.
+Tests may set the test-only `COVEARCHIVE_TEST_ARIA2` absolute executable override. Hard-killed parents can leave an ACL-protected private config after the child exits; stale-directory sweeping is FUTURE work.
+
 ## Development
 
 Python 3.12 or newer is required. The test extra declares pytest as a development
