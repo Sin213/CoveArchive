@@ -84,11 +84,21 @@ Publisher SHA-256 is recorded when GitHub supplies it; local SHA-256 belongs onl
 Unknown or newer schema versions are rejected, never overwritten.
 
 **Trust rule:** a completed entry in JSON is only a claim; "publisher verified" requires publisher evidence.
-The plan asks CA-S5 to verify real file existence, size, local SHA-256 and publisher SHA-256 when available before any skip.
+The plan requests real file verification before any skip; CA-S5 checks existence, size, local SHA-256 and publisher SHA-256 when available.
 
 Rescans plan new releases/assets, retain those removed from GitHub or hidden by filters without deleting them, and flag remote metadata changes for reconciliation.
-**Limits:** CA-S4 is pure in-memory planning and metadata validation. No archive folders or JSON files are written, no downloads occur, and no files are verified. The GUI does not use it yet.
-Reparse-point, junction, symlink, TOCTOU and concurrent-writer protection are not implemented yet (CA-S5).
+**Limits:** CA-S4 remains pure in-memory planning and metadata validation. CA-S5 provides local persistence separately; downloads and GUI integration remain future work.
+
+## CA-S5: persistence
+
+Authorize an existing local NTFS directory with `ArchiveRoot.open`, then use pinned project/release handles. Assets stream through exclusive temps, flush, publish without replacement and verify through the published name. Identical retries report `already_present`; conflicting destinations are preserved. Only real-byte verification authorizes a completed record.
+
+`project_writer` holds an exclusive OS project lock. Commit release manifests first and the index last, using the loaded index SHA-256 as a compare-and-swap token. Loading reports corruption, unsupported versions and index/release mismatches without repairing them. Corrupt or unsupported manifests must be explicitly quarantined before replacement. Recovery removes only idle, regular files matching `.covearchive-tmp-<32 lowercase hex>.part` exactly. Exact internal names are reserved by role: `archive-index.json` and `.covearchive.lock` in project directories, `release.json` in release directories, and exact temporary-pattern names in both. Other `.covearchive` prefixes and quarantine-like asset names are allowed.
+
+| Guarantee class | Scope |
+| --- | --- |
+| Handle-anchored | On an authorized local NTFS root: pinned ancestors and relative handles reject traversal, reparse points, junctions, symlinks, directory swaps and case/8.3 aliases below the root; exclusive temp creation; no-replace asset publication; size and hash from one read handle. |
+| Best-effort / not guaranteed | Components above the root resolve once before its identity is pinned. Remote and non-NTFS volumes are rejected where detectable. `FlushFileBuffers` covers files only, with no directory-flush or power-loss guarantee. Held manifests deny in-place writes. A non-cooperating process with delete-sharing can rename-replace a manifest during commit; unlink checks before and after publication detect namespace changes on a best-effort basis, without an atomic filesystem compare-and-replace. Other same-user/admin processes or antivirus may alter closed files, so completion is point-in-time verification. Verification rejects hard links (link count must be one), but later link creation cannot be prevented. |
 
 **Future transfer defaults (design only, not implemented)**
 
