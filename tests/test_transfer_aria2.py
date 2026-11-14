@@ -165,7 +165,9 @@ def test_security_transfer_AST():
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 names = [n.name for n in node.names] if isinstance(node, ast.Import) else [node.module or ""]
-                assert not any(n.startswith(("covearchive.ui", "covearchive.github", "covearchive.archive", "requests")) for n in names)
+                assert not any(n.startswith(("covearchive.ui", "covearchive.github", "covearchive.archive", "requests"))
+                    and not (path.name == "resolve.py" and n in ("requests", "covearchive.github.client",
+                        "covearchive.github.models", "covearchive.github.urls")) for n in names)
             if isinstance(node, ast.Call):
                 assert not any(k.arg == "shell" and isinstance(k.value, ast.Constant) and k.value.value is True for k in node.keywords)
                 assert not (isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)

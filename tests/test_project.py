@@ -191,7 +191,7 @@ def test_source_imports_are_stdlib_or_own_package_only():
                     or (
                         root == "requests"
                         and path.relative_to(ROOT).as_posix()
-                        == "src/covearchive/github/client.py"
+                        in ("src/covearchive/github/client.py", "src/covearchive/transfer/resolve.py")
                     )
                 ), (
                     path.relative_to(ROOT), node.lineno, module

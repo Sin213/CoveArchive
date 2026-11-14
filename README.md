@@ -6,16 +6,17 @@ they control, with an index that can support later verification and rescanning.
 
 ## Status
 
-**pre-alpha, slice CA-S3** — Windows-first native PySide6 release scanner GUI.
+**pre-alpha, slice CA-S7** - secure selected-asset download-to-archive backend; scanner GUI unchanged.
 
-The scope of this slice is project bootstrap, a GitHub URL classifier, and a
-release-asset format matcher. These are the foundations for the planned workflow.
+The earlier pre-alpha, slice CA-S3 delivered project bootstrap, a GitHub URL classifier,
+and a release-asset format matcher. CA-S7 adds the selected-asset archive backend.
 The URL parser classifies supported targets, and the format matcher identifies
 supported asset suffixes. An offline test suite covers both components.
 
 The GUI uses CA-S2 release discovery through the official GitHub REST API. Expand
 releases to inspect all assets; format and prerelease filters run locally. Release
-notes are not shown. There are no downloads, SQLite, or archive writes yet.
+notes are not shown. The GUI has no download/archive controls; the backend now downloads
+and archives selected assets. SQLite and queue integration are not implemented.
 
 Python 3.12+, requests (>=2.32,<3), and PySide6 (>=6.11,<7) are required. From the
 source tree, launch `python run_covearchive.py`. The developer diagnostic
@@ -87,7 +88,7 @@ Unknown or newer schema versions are rejected, never overwritten.
 The plan requests real file verification before any skip; CA-S5 checks existence, size, local SHA-256 and publisher SHA-256 when available.
 
 Rescans plan new releases/assets, retain those removed from GitHub or hidden by filters without deleting them, and flag remote metadata changes for reconciliation.
-**Limits:** CA-S4 remains pure in-memory planning and metadata validation. CA-S5 provides local persistence separately; downloads and GUI integration remain future work.
+**Limits:** CA-S4 remains pure in-memory planning and metadata validation. CA-S5 provides local persistence; CA-S7 connects downloads to it. GUI integration remains future work.
 
 ## CA-S5: persistence
 
@@ -117,7 +118,7 @@ A non-cooperating process can replace a manifest between validation and publicat
 - CA-S5.1 limitation: recovery reconciliation must adopt the persisted repository spelling; case-only different spelling is rejected by exact commit identity checks, even though it identifies the same GitHub repository.
 - Informational: newer-schema manifests are quarantined only by an explicit call; the planner's `digest_added` path never compares a new publisher digest with the local hash; a remote asset named like a temporary-file pattern passes the planner but can never be written.
 
-**Future transfer defaults (design only, not implemented)**
+**Future queue defaults (CA-S8 design only, not implemented)**
 
 - 2 concurrent downloads.
 - 4 connections per download, subject to server range support.
@@ -128,10 +129,11 @@ A non-cooperating process can replace a manifest between validation and publicat
 - API request pacing separate from asset transfer scheduling.
 - No bot-detection evasion and no circumvention of GitHub restrictions.
 
-## FUTURE workflow — not implemented
+## FUTURE GUI workflow — not implemented
 
-Discovery and filtering are available. Destination selection, downloads and archive
-management in the following workflow are FUTURE, not implemented:
+Discovery and filtering are available in the GUI. Selected-asset downloading and
+archiving are available through the CA-S7 backend API. Destination selection and
+the remaining GUI workflow are FUTURE, not implemented:
 
 1. Paste a GitHub repository or releases URL.
 2. Discover releases through the official GitHub REST API.
@@ -153,10 +155,90 @@ As a design rule, downloads are never automatically executed or extracted.
 The standalone backend owns an unprivileged aria2 1.37.x child: authenticated loopback-only RPC, TCP-table PID ownership proof, and a secret only in memory and an ACL-verified private config, never arguments. Its minimal environment strips proxies; no proxy support. Defaults: 2 active, 4 connections, unlimited bandwidth.
 Strict `.part` names stay in work_dir: no overwrite, automatic rename, transfer-data deletion, archive publication or manifest writes. Only the final work_dir component is checked for reparse points; CA-S7's verified staging directory owns ancestry.
 Explicit resume requires expected size and regular data/control files. aria2 cannot detect same-size changed content or tampered/truncated partials. If-Range helps; CA-S7 MUST fully hash every completed download. Completion is transport only, never local/publisher verification.
-aria2 follows cross-origin redirects; no redirect-host enforcement is claimed. CA-S7 must probe with its own no-follow client, submit the approved URL, audit `currentUri`, and separately probe Retry-After (unavailable through aria2).
+aria2 follows cross-origin redirects; no redirect-host enforcement is claimed. CA-S7 uses a separate redirect-controlled streaming backend; aria2 is excluded from its production path because actual transfer redirects cannot be constrained.
 No engine retries/backoff. CA-S8 owns optional 1-5 s start jitter (default off), server cooldowns, bounded exponential backoff with jitter, and no bot-detection evasion.
-Queue persistence, GUI integration, secure URL resolution, hashing and archive publication remain FUTURE. CA-S5.1 carryovers F3, L2 and F1 are untouched and NOT fixed. Real disk-full is not verified; real file-I/O is.
+Queue persistence and GUI download integration remain FUTURE. CA-S7 supplies secure URL resolution, hashing and archive publication; its treatment of the unchanged CA-S5.1 F1/F3/L2 carryovers is described below. Disk-full injection is tested; actual disk exhaustion is not verified.
 Tests may set the test-only `COVEARCHIVE_TEST_ARIA2` absolute executable override. Hard-killed parents can leave an ACL-protected private config after the child exits; stale-directory sweeping is FUTURE work.
+
+## CA-S7: secure download-to-archive pipeline
+
+`archive_asset(repository, release, asset, archive_root, ...)` handles one selected
+uploaded asset: pure planning, fresh API resolution, bounded streaming to an
+exclusive opaque NTFS temp, size/SHA-256 verification, no-replace publication,
+then release.json followed by archive-index.json. Assets remain in per-release folders.
+Anonymous requests only: private repositories are unsupported. No queue, GUI download
+controls, background scheduler, or CA-S8 Auto-Archive is implemented.
+
+Production uses HTTPS with TLS verification, no credentials/cookies, no environment
+proxies/netrc/CA overrides, no automatic redirects, and identity byte encoding.
+The identity-bound API may return binary bytes directly with 200 or redirect with 302;
+both paths receive the same header, peer, size, and streaming checks.
+Each actual redirect hop is checked independently, with loop/hop limits and an
+exact hostname allowlist: `api.github.com` is the identity-bound asset API;
+`release-assets.githubusercontent.com` is the current signed release CDN;
+`objects.githubusercontent.com` and `github-releases.githubusercontent.com` are
+established release storage hosts. These documented/observed hosts must be
+re-verified when GitHub changes; unknown destinations fail closed, with no wildcard.
+Caller-supplied browser URLs are never trusted. Signed URLs stay transient and a
+rejected signed URL is re-resolved once. Errors/results/manifests omit signed URLs;
+connection-pool DEBUG logging is suppressed only for the transfer thread during I/O.
+
+DNS answers must be public; connected-peer checking is best effort when a socket
+is exposed. Requests resolves again, leaving a DNS-rebinding TOCTOU window: this
+is not DNS pinning. aria2 remains available separately and regression-tested;
+it follows redirects, so preflight validation cannot enforce its later destination.
+CA-S7 therefore uses one in-process streaming connection, no range resume, and
+restart-from-zero on retry. Stalls have bounded socket timeouts; the overall default
+budget is six hours. Partial reads return control between arrivals; cancellation latency
+is bounded by the per-socket read timeout. urllib3 1.x without read1 uses bounded
+4096-byte reads; deadline/cancel checks have coarser granularity until each read returns.
+Retry waits respect the remaining deadline.
+Read/connect/server retries are bounded before body consumption;
+mid-body failures return partial_transfer. Rate-limit guidance is returned to callers.
+
+`ArchiveResult.status` is ARCHIVED, ALREADY_ARCHIVED, VERIFIED_EXISTING, MODIFIED,
+CONFLICT, MISMATCH, CANCELLED, UPSTREAM_REMOVED, RECONCILE_REQUIRED, or FAILED.
+PUBLISHER_VERIFIED maps to AssetRecord.publisher_verified; LOCAL_HASH_ONLY means a
+completed record with a real local hash and no publisher digest. JSON alone is no proof.
+A newly available publisher digest is checked against completed bytes without rewriting
+the recorded entry: a matching skip keeps its recorded integrity label. A conflicting
+digest fails before a missing completed file is fetched. Planned/recovered records enforce
+and record the effective publisher digest before claiming PUBLISHER_VERIFIED.
+Completed files are rehashed before skipping; modified files are preserved. Missing
+files are downloaded again and checked against prior hashes. Planned files with a
+publisher hash may be adopted after verification; without one, fresh matching bytes
+are required. Changed recorded metadata requests reconciliation. Recovery downgrades
+unindexed claims to planned and re-establishes proof. Remote removal never deletes files.
+
+Each asset commit briefly holds the per-project lock, reloads and merges current
+records, then commits release first and index last with CAS. Unrelated indexed damage
+may prevent index commit after publication: manifest_commit_incomplete preserves the
+file. A narrowly validated release-ahead-of-index interruption can converge: unchanged
+index assets win, additional manifest claims are downgraded to planned, and selected
+bytes are re-established before both documents are committed. Recovery also permits
+planned-to-completed transitions with the same publisher digest or a newly added one;
+the index version wins and current metadata must supply any added digest again. Other manifest differences
+remain fail-closed. A missing indexed release.json is restorable only when its folder
+contains indexed asset names and exact internal temp names, with normal type/reparse
+checks and orphan cleanup. The index supplies all records; verified existing bytes
+skip network access but still rebuild release.json and commit the index (MANIFEST_RECOVERY).
+Before transferring a new asset during restoration, a short writer lock rebuilds the
+release manifest from indexed claims; an unchanged index is not rewritten. Only this
+call's validated plan-allocated filename may extend the restoration name allowance,
+with normal file/type/reparse checks; it supplies no integrity evidence.
+An absent folder or interrupted restoration follows the same retry path. Foreign entries
+block restoration. Unrelated commits may stay incomplete until the affected release
+is reconciled; selecting a verified indexed sibling also commits pending recovery
+without network access, retaining downgraded claims even if they vanished upstream. Existing-file hashing in the store is not interruptible; cancellation is
+honored after adoption verification and before metadata commits. Only a file newly
+published by this call starts the commit phase that completes despite cancellation.
+Cancellation is honored through the last stream read/EOF check; a request during the
+final flush/rename or later commit is treated as after publication.
+Empty directories may remain after failure; partial temp files are cleaned up.
+F1 best-effort manifest replacement and power-loss limits remain. F3 identity checks
+are closed in this pipeline only; the store is unchanged. The store's L2 size-only
+planned-record path is never used to authorize completion. Neither transport completion
+nor a local hash alone implies publisher verification.
 
 ## Development
 
