@@ -546,3 +546,601 @@ def test_role_specific_reservations(tmp_path, owner, repo):
                             store.write_asset(folder, name, [], 0)
     except winfs.ArchiveError as exc:
         raise AssertionError(f"unexpected reservation or filesystem error: {exc.code}") from exc
+
+
+def test_single_unit_asset_publish_verify_and_no_replace(tmp_path):
+    claim = record(saved_name="a", publisher_sha256=SHA)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        first = store.write_asset(root, "a", [DATA], len(DATA), SHA)
+        assert (first.code, first.local_sha256, first.size) == ("published", SHA, len(DATA))
+        verified = store.verify_asset(root, claim)
+        assert (verified.code, verified.local_sha256, verified.size) == ("verified", SHA, len(DATA))
+        assert store.completed_record(claim, verified).status == "completed"
+        assert store.write_asset(root, "a", [DATA], len(DATA), SHA).code == "already_present"
+        with pytest.raises(winfs.ArchiveConflictError):
+            store.write_asset(root, "a", [b"x" * len(DATA)], len(DATA))
+    assert os.listdir(tmp_path) == ["a"]
+    assert (tmp_path / "a").read_bytes() == DATA
+
+
+@pytest.mark.parametrize("actual", [DATA[:-1], DATA + b"x"], ids=["too-small", "too-large"])
+def test_verify_size_mismatch_before_read_or_hash(tmp_path, monkeypatch, actual):
+    (tmp_path / "asset.bin").write_bytes(actual)
+    claim = record(status="completed", local_sha256=SHA)
+
+    def forbidden_read(*args, **kwargs):
+        pytest.fail("size mismatch must be rejected before reading asset bytes")
+
+    def forbidden_hash(*args, **kwargs):
+        pytest.fail("size mismatch must be rejected before constructing SHA-256")
+
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with monkeypatch.context() as guard:
+            guard.setattr(winfs.Handle, "read", forbidden_read)
+            result = store.verify_asset(root, claim)
+        with monkeypatch.context() as guard:
+            guard.setattr(store.hashlib, "sha256", forbidden_hash)
+            hash_guarded = store.verify_asset(root, claim)
+        for verification in (result, hash_guarded):
+            assert verification.code == "size_mismatch"
+            assert verification.size == len(actual)
+            assert verification.local_sha256 is None
+            with pytest.raises(winfs.ArchiveError, match="unverified"):
+                store.completed_record(claim, verification)
+    assert (tmp_path / "asset.bin").read_bytes() == actual
+
+
+@pytest.mark.parametrize("which", ["index", "release"])
+@pytest.mark.parametrize("window", ["rename-aside", "posix-replace"])
+def test_accepted_limitation_manifest_race_after_precheck(tmp_path, monkeypatch, which, window):
+    """ACCEPTED LIMITATION: foreign replacements can be overwritten (CA-S5.1)."""
+    index, release = documents()
+    index = replace(index, releases=())
+    committed = (m.dumps_index(index) if which == "index" else m.dumps_release_manifest(release)).encode()
+    original_bytes = committed + b"\n"
+    foreign_bytes = b"synthetic foreign manifest replacement"
+    calls = 0
+    real_unlinked = winfs.Handle.unlinked
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with store.project_writer(root):
+            with root.open_dir(FOLDER, create=True) as folder:
+                directory = root if which == "index" else folder
+                path = tmp_path / "archive-index.json" if which == "index" else tmp_path / FOLDER / "release.json"
+                moved = path.with_suffix(".moved")
+                path.write_bytes(original_bytes)
+
+                def after_precheck(held):
+                    nonlocal calls
+                    result = real_unlinked(held)
+                    calls += 1
+                    if calls == 1:
+                        assert result is False
+                        if window == "rename-aside":
+                            os.rename(path, moved)
+                            path.write_bytes(foreign_bytes)
+                        else:
+                            with directory.create_temp() as foreign:
+                                foreign.write(foreign_bytes)
+                                foreign.rename(directory, path.name, replace=True, metadata=True)
+                        assert path.read_bytes() == foreign_bytes
+                    return result
+
+                monkeypatch.setattr(winfs.Handle, "unlinked", after_precheck)
+
+                def commit():
+                    if which == "index":
+                        store.commit_index(root, index, hashlib.sha256(original_bytes).hexdigest())
+                    else:
+                        store.commit_release(folder, release)
+
+                if window == "rename-aside":
+                    with pytest.raises(winfs.ArchiveConflictError, match="destination_changed"):
+                        commit()
+                    assert moved.read_bytes() == original_bytes
+                else:
+                    commit()
+                    assert not moved.exists()
+                assert calls == 2
+                assert path.read_bytes() == committed
+                assert not any(winfs.TEMP_PATTERN.fullmatch(name) for name in directory.names())
+
+
+@pytest.mark.parametrize("owner,repo", [("owner", "repo"), ("OWNER", "REPO"),
+                                       ("owner", "Repo"), ("Owner", "repo")])
+def test_f2_project_reuses_established_case(tmp_path, owner, repo):
+    def identity(handle):
+        info = handle.info()
+        return info.volume_serial, info.file_id
+
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with store.ensure_project(root, RepositoryTarget("Owner", "Repo")) as project:
+            before = identity(project.parent), identity(project)
+            assert (project.parent.name, project.name) == ("Owner", "Repo")
+        with store.ensure_project(root, RepositoryTarget(owner, repo)) as project:
+            assert (identity(project.parent), identity(project)) == before
+            assert (project.parent.name, project.name) == ("Owner", "Repo")
+        assert not root._children
+    assert os.listdir(tmp_path) == ["Owner"]
+    assert os.listdir(tmp_path / "Owner") == ["Repo"]
+
+
+def test_f2_new_project_uses_requested_spelling(tmp_path):
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with store.ensure_project(root, RepositoryTarget("NewOwner", "NewRepo")) as project:
+            assert (project.parent.name, project.name) == ("NewOwner", "NewRepo")
+    assert os.listdir(tmp_path) == ["NewOwner"]
+    assert os.listdir(tmp_path / "NewOwner") == ["NewRepo"]
+
+
+@pytest.mark.parametrize("where", ["owner", "repo"])
+@pytest.mark.parametrize("kind", ["junction", "file"])
+def test_f2_case_variant_unsafe_project_entry(tmp_path, where, kind):
+    target = tmp_path / "target"
+    target.mkdir()
+    if where == "repo":
+        (tmp_path / "Owner").mkdir()
+    entry = tmp_path / "Owner" if where == "owner" else tmp_path / "Owner" / "Repo"
+    if kind == "junction":
+        junction(entry, target)
+    else:
+        entry.write_bytes(b"synthetic existing file")
+    try:
+        with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+            code = "reparse_point" if kind == "junction" else "not_regular_file"
+            with pytest.raises(winfs.ArchiveUnsafePathError, match=code):
+                with store.ensure_project(root, RepositoryTarget("owner", "repo")):
+                    pytest.fail("unsafe project entry was accepted")
+            assert not root._children
+        assert os.listdir(target) == []
+        assert sorted(os.listdir(tmp_path)) == ["Owner", "target"]
+        if where == "repo":
+            assert os.listdir(tmp_path / "Owner") == ["Repo"]
+        if kind == "file":
+            assert entry.read_bytes() == b"synthetic existing file"
+    finally:
+        if kind == "junction":
+            entry.rmdir()
+
+
+@pytest.mark.parametrize("which", ["index", "release"])
+@pytest.mark.parametrize("repository", [RepositoryTarget("Foreign", "Repo"), RepositoryTarget("owner", "repo")])
+def test_f2_commit_identity_remains_exact(tmp_path, which, repository):
+    established = RepositoryTarget("Owner", "Repo")
+    index, release = documents()
+    index, release = replace(index, repository=established), replace(release, repository=established)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with store.ensure_project(root, established) as project:
+            with store.project_writer(project):
+                with store.ensure_release(project, FOLDER, 1) as folder:
+                    store.commit_release(folder, release)
+                    store.commit_index(project, index, None)
+        directory = tmp_path / "Owner" / "Repo"
+        paths = [directory / "archive-index.json", directory / FOLDER / "release.json"]
+        before = [path.read_bytes() for path in paths]
+        with store.ensure_project(root, RepositoryTarget("owner", "repo")) as project:
+            with store.project_writer(project):
+                state = store.load_project_state(project)
+                with store.ensure_release(project, FOLDER, 1) as folder:
+                    with pytest.raises(winfs.ArchiveConflictError, match="^identity$"):
+                        if which == "index":
+                            store.commit_index(project, replace(index, repository=repository), state.index_sha256)
+                        else:
+                            store.commit_release(folder, replace(release, repository=repository))
+        assert [path.read_bytes() for path in paths] == before
+
+
+def test_f2_reopen_load_plan_commit_adopts_persisted_case(tmp_path):
+    established = RepositoryTarget("Owner", "Repo")
+    requested = RepositoryTarget("owner", "repo")
+    remote = parse_release(dict(id=1, tag_name="v1", draft=False, prerelease=False,
+        created_at="2026-11-13T12:00:00Z", assets=[]))
+    catalog = ReleaseCatalog(requested, (remote,), 1, 1, 0, (), "/repos/owner/repo/releases", True)
+    index, release = documents()
+    index, release = replace(index, repository=established), replace(release, repository=established)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with store.ensure_project(root, established) as project:
+            with store.project_writer(project):
+                with store.ensure_release(project, FOLDER, 1) as folder:
+                    store.commit_release(folder, release)
+                    store.commit_index(project, index, None)
+        with store.ensure_project(root, requested) as project:
+            with store.project_writer(project):
+                state = store.load_project_state(project)
+                assert not state.issues
+                plan = plan_archive(catalog, archive_root=str(tmp_path), repository=requested, index=state.index)
+                assert plan.index.repository == established
+                with store.ensure_release(project, FOLDER, 1) as folder:
+                    store.commit_release(folder, release)
+                    store.commit_index(project, plan.index, state.index_sha256)
+                assert store.load_project_state(project).index.repository == established
+    assert os.listdir(tmp_path) == ["Owner"]
+    assert os.listdir(tmp_path / "Owner") == ["Repo"]
+    assert sorted(os.listdir(tmp_path / "Owner" / "Repo")) == [".covearchive.lock", "archive-index.json", FOLDER]
+
+
+def _f4_snapshot(path):
+    return tuple(sorted((entry.relative_to(path).as_posix(),
+                         None if entry.is_dir() else entry.read_bytes())
+                        for entry in path.rglob("*")))
+
+
+def _f4_put(path, release, folder=None):
+    directory = path / (release.folder if folder is None else folder)
+    directory.mkdir(exist_ok=True)
+    (directory / "release.json").write_bytes(m.dumps_release_manifest(release).encode())
+
+
+def test_f4_project_state_default_preserves_four_argument_constructor():
+    state = store.ProjectState(None, (), None, ())
+    assert state.unindexed == ()
+    assert store.ProjectState(None, (), None, (), unindexed=()).unindexed == ()
+
+
+@pytest.mark.parametrize("index_kind", ["missing", "empty", "directory"])
+def test_f4_returns_unindexed_without_modification(tmp_path, index_kind):
+    index, release = documents()
+    _f4_put(tmp_path, release)
+    if index_kind == "empty":
+        (tmp_path / "archive-index.json").write_bytes(m.dumps_index(replace(index, releases=())).encode())
+    elif index_kind == "directory":
+        (tmp_path / "archive-index.json").mkdir()
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        assert state.unindexed == (release,)
+        assert state.releases == ()
+        assert (FOLDER, "unindexed_release") in state.issues
+        if index_kind != "empty":
+            assert ("archive-index.json", "missing" if index_kind == "missing" else "not_regular_file") in state.issues
+        assert not root._children
+    assert _f4_snapshot(tmp_path) == before
+
+
+def test_f4_unindexed_sorted_by_release_id(tmp_path):
+    _, release = documents()
+    first = replace(release, folder="release-z--1")
+    second = replace(release, release_id=2, folder="release-a--2")
+    for item in (second, first):
+        _f4_put(tmp_path, item)
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        assert state.unindexed == (first, second)
+        assert state.releases == ()
+        assert {(item.folder, "unindexed_release") for item in (first, second)} <= set(state.issues)
+    assert _f4_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("kind,code", [("corrupt", "corrupt"), ("unsupported", "unsupported_version")])
+def test_f4_invalid_release_not_returned(tmp_path, kind, code):
+    _, release = documents()
+    _f4_put(tmp_path, release)
+    (tmp_path / FOLDER / "release.json").write_bytes(b"invalid" if kind == "corrupt" else b'{"schema_version":99}')
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        assert state.unindexed == ()
+        assert (FOLDER, code) in state.issues
+        assert (FOLDER, "unindexed_release") not in state.issues
+    assert _f4_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("folder", ["release-other--1", "release-other--2"])
+def test_f4_folder_or_id_mismatch_rejected(tmp_path, folder):
+    _, release = documents()
+    _f4_put(tmp_path, release, folder)
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        assert state.unindexed == ()
+        assert {(folder, "unindexed_release"), (folder, "consistency")} <= set(state.issues)
+    assert _f4_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("repository,accepted", [(RepositoryTarget("foreign", "repo"), False),
+    (RepositoryTarget("owner", "other"), False), (RepositoryTarget("OWNER", "REPO"), False)])
+def test_f4_repository_key_validation(tmp_path, repository, accepted):
+    index, release = documents()
+    candidate = replace(release, repository=repository)
+    _f4_put(tmp_path, candidate)
+    (tmp_path / "archive-index.json").write_bytes(m.dumps_index(replace(index, releases=())).encode())
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        assert state.unindexed == ((candidate,) if accepted else ())
+        assert (FOLDER, "unindexed_release") in state.issues
+        assert ((FOLDER, "consistency") in state.issues) is not accepted
+    assert _f4_snapshot(tmp_path) == before
+
+
+def test_f4_duplicate_id_against_index_rejected(tmp_path):
+    index, release = documents()
+    candidate = replace(release, folder="release-duplicate--1")
+    for item in (release, candidate):
+        _f4_put(tmp_path, item)
+    (tmp_path / "archive-index.json").write_bytes(m.dumps_index(index).encode())
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        assert state.unindexed == ()
+        assert state.releases == (release,)
+        assert {(candidate.folder, "unindexed_release"), (candidate.folder, "consistency")} <= set(state.issues)
+    assert _f4_snapshot(tmp_path) == before
+
+
+def test_f4_duplicate_unindexed_ids_reject_both(tmp_path):
+    _, release = documents()
+    candidates = [replace(release, folder="release-alpha--1"), replace(release, folder="release-beta--1")]
+    for item in candidates:
+        _f4_put(tmp_path, item)
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        assert state.unindexed == ()
+        for item in candidates:
+            assert {(item.folder, "unindexed_release"), (item.folder, "consistency")} <= set(state.issues)
+    assert _f4_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("cap", [0, 1])
+def test_f4_unindexed_cap_preserves_excess_and_issue(tmp_path, monkeypatch, cap):
+    _, release = documents()
+    candidates = [replace(release, release_id=i, folder=f"release-cap--{i}") for i in (3, 1, 2)]
+    for item in candidates:
+        _f4_put(tmp_path, item)
+    monkeypatch.setattr(m, "MAX_RELEASES", cap)
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        ordered = sorted(candidates, key=lambda item: item.release_id)
+        assert state.unindexed == tuple(ordered[:cap])
+        for item in ordered:
+            assert (item.folder, "unindexed_release") in state.issues
+            assert ((item.folder, "limit") in state.issues) == (item not in ordered[:cap])
+    assert _f4_snapshot(tmp_path) == before
+
+
+def test_f4_duplicate_id_across_retention_cap(tmp_path, monkeypatch):
+    _, release = documents()
+    first = replace(release, folder="release-alpha--1")
+    second = replace(release, folder="release-beta--1")
+    for candidate in (first, second):
+        _f4_put(tmp_path, candidate)
+    monkeypatch.setattr(m, "MAX_RELEASES", 1)
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        assert state.unindexed == ()
+        for candidate in (first, second):
+            assert (candidate.folder, "consistency") in state.issues
+            assert (candidate.folder, "unindexed_release") in state.issues
+        assert not any(code == "limit" for _, code in state.issues)
+    assert _f4_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("kind,code", [("corrupt", "corrupt"), ("unsupported", "unsupported_version")])
+def test_f4_bad_index_keeps_early_return_without_scanning(tmp_path, kind, code):
+    _, release = documents()
+    _f4_put(tmp_path, release)
+    raw = b"invalid" if kind == "corrupt" else b'{"schema_version":99}'
+    (tmp_path / "archive-index.json").write_bytes(raw)
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        assert state.unindexed == () and state.releases == () and state.index is None
+        assert state.issues == (("archive-index.json", code),)
+        assert state.index_sha256 == hashlib.sha256(raw).hexdigest()
+    assert _f4_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("actual,code", [(None, "missing"), (b"x" * len(DATA), "hash_mismatch")])
+def test_f4_recovered_completed_claim_requires_actual_verification(tmp_path, actual, code):
+    _, release = documents()
+    completed = record(status="completed", local_sha256=SHA)
+    release = replace(release, assets=(completed,))
+    _f4_put(tmp_path, release)
+    if actual is not None:
+        (tmp_path / FOLDER / completed.saved_name).write_bytes(actual)
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        assert state.unindexed == (release,)
+        recovered = state.unindexed[0].assets[0]
+        with root.open_dir(FOLDER) as folder:
+            result = store.verify_asset(folder, recovered)
+            assert result.code == code
+            with pytest.raises(winfs.ArchiveError, match="unverified"):
+                store.completed_record(recovered, result)
+    assert _f4_snapshot(tmp_path) == before
+
+
+def test_r1_unindexed_manifest_retention_is_bounded(tmp_path, monkeypatch):
+    import gc
+    import weakref
+
+    _, release = documents()
+    for release_id in range(1, 6):
+        _f4_put(tmp_path, replace(release, release_id=release_id, folder=f"release-memory--{release_id}"))
+    cap = 1
+    monkeypatch.setattr(m, "MAX_RELEASES", cap)
+    earlier = []
+    real_read = store._read_document
+
+    def bounded_read(directory, name):
+        gc.collect()
+        alive = sum(reference() is not None for reference in earlier)
+        assert alive <= cap + 1, f"retained {alive} earlier release manifests; cap is {cap}"
+        document, raw = real_read(directory, name)
+        if name == "release.json":
+            earlier.append(weakref.ref(document))
+        return document, raw
+
+    monkeypatch.setattr(store, "_read_document", bounded_read)
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        assert len(earlier) == 5
+        assert len(state.unindexed) == cap
+        assert sum(code == "limit" for _, code in state.issues) == 4
+    assert _f4_snapshot(tmp_path) == before
+
+
+def test_docs_claims_manifest_replacement_limitations():
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    for text in (readme, store.__doc__):
+        normalized = " ".join(text.split())
+        assert "may overwrite" in normalized
+        assert "a replacement race is detected after publication" not in normalized
+        assert "detect namespace changes on a best-effort basis" not in normalized
+    assert "Known limitations carried forward" in readme
+
+
+def _r3a_enable_case_sensitive(directory):
+    try:
+        result = subprocess.run(["fsutil.exe", "file", "setCaseSensitiveInfo", str(directory), "enable"],
+                                capture_output=True, text=True, timeout=15)
+    except FileNotFoundError:
+        pytest.skip("fsutil.exe is unavailable; case-sensitive NTFS fixture cannot be enabled")
+    print(f"CASE-SENSITIVE NTFS SETUP: {directory}; exit={result.returncode}; {result.stdout}{result.stderr}")
+    if result.returncode:
+        output = (result.stdout + result.stderr).lower()
+        if any(marker in output for marker in ("not supported", "not implemented", "access is denied", "privilege")):
+            pytest.skip(f"case-sensitive NTFS feature unavailable: {output}")
+        pytest.fail(f"case-sensitive NTFS setup failed with exit {result.returncode}: {output}")
+
+
+@pytest.mark.parametrize("where", ["owner", "repo"])
+@pytest.mark.parametrize("spelling", ["title", "lower", "upper"])
+def test_r3a_project_case_sensitive_ambiguity_rejected(tmp_path, where, spelling):
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    if where == "repo":
+        (archive / "Owner").mkdir()
+    parent = archive if where == "owner" else archive / "Owner"
+    _r3a_enable_case_sensitive(parent)
+    established = "Owner" if where == "owner" else "Repo"
+    for name in (established, established.lower()):
+        (parent / name).mkdir()
+    assert sorted(os.listdir(parent)) == [established, established.lower()]
+    requested = {"title": established, "lower": established.lower(), "upper": established.upper()}[spelling]
+    repository = RepositoryTarget(requested, "Repo") if where == "owner" else RepositoryTarget("Owner", requested)
+    before = _f4_snapshot(archive)
+    with winfs.ArchiveRoot.open(str(archive)) as root:
+        with pytest.raises(winfs.ArchiveConflictError, match="^case_alias$"):
+            with store.ensure_project(root, repository):
+                pytest.fail("ambiguous case-sensitive project was accepted")
+        assert not root._children
+    assert _f4_snapshot(archive) == before
+
+
+@pytest.mark.parametrize("where", ["owner", "repo"])
+def test_r3a_project_case_sensitive_unique_case_reused(tmp_path, where):
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    if where == "repo":
+        (archive / "Owner").mkdir()
+    parent = archive if where == "owner" else archive / "Owner"
+    _r3a_enable_case_sensitive(parent)
+    if where == "owner":
+        (archive / "Owner").mkdir()
+    (archive / "Owner" / "Repo").mkdir()
+    before = _f4_snapshot(archive)
+    with winfs.ArchiveRoot.open(str(archive)) as root:
+        with store.ensure_project(root, RepositoryTarget("Owner", "Repo")) as project:
+            owner_info, repo_info = project.parent.info(), project.info()
+        with store.ensure_project(root, RepositoryTarget("OWNER", "REPO")) as project:
+            assert (project.parent.name, project.name) == ("Owner", "Repo")
+            for handle, previous in ((project.parent, owner_info), (project, repo_info)):
+                actual = handle.info()
+                assert (actual.volume_serial, actual.file_id) == (previous.volume_serial, previous.file_id)
+        assert not root._children
+    assert _f4_snapshot(archive) == before
+
+
+def test_r3b_duplicates_free_capacity_for_later_unique_manifest(tmp_path, monkeypatch):
+    _, release = documents()
+    alpha = replace(release, folder="release-alpha--1")
+    beta = replace(release, folder="release-beta--1")
+    gamma = replace(release, release_id=2, folder="release-gamma--2")
+    for candidate in (alpha, beta, gamma):
+        _f4_put(tmp_path, candidate)
+    monkeypatch.setattr(m, "MAX_RELEASES", 2)
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        assert state.unindexed == (gamma,)
+        for candidate in (alpha, beta):
+            assert (candidate.folder, "consistency") in state.issues
+        assert not any(code == "limit" for _, code in state.issues)
+        assert (gamma.folder, "consistency") not in state.issues
+        for candidate in (alpha, beta, gamma):
+            assert (candidate.folder, "unindexed_release") in state.issues
+    assert _f4_snapshot(tmp_path) == before
+
+
+def test_r3b_retention_uses_folder_scan_order_before_result_id_order(tmp_path, monkeypatch):
+    _, release = documents()
+    first = replace(release, release_id=3, folder="release-a--3")
+    second = replace(release, folder="release-b--1")
+    for candidate in (second, first):
+        _f4_put(tmp_path, candidate)
+    monkeypatch.setattr(m, "MAX_RELEASES", 1)
+    before = _f4_snapshot(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        state = store.load_project_state(root)
+        assert state.unindexed == (first,)
+        assert (second.folder, "limit") in state.issues
+        assert (first.folder, "limit") not in state.issues
+        assert not any(code == "consistency" for _, code in state.issues)
+    assert _f4_snapshot(tmp_path) == before
+
+
+def _r3b_completed_recovery_fixture(tmp_path):
+    _, release = documents()
+    release = replace(release, repository=RepositoryTarget("Recovered", "Spelling"),
+                      assets=(record(status="completed", local_sha256=SHA),))
+    _f4_put(tmp_path, release)
+    (tmp_path / FOLDER / release.assets[0].saved_name).write_bytes(DATA)
+    return release
+
+
+def test_r3b_missing_index_reconciliation_adopts_recovered_spelling(tmp_path):
+    original = _r3b_completed_recovery_fixture(tmp_path)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with store.project_writer(root):
+            state = store.load_project_state(root)
+            assert state.index is None and state.unindexed == (original,)
+            recovered = state.unindexed[0]
+            repository = recovered.repository
+            with store.ensure_release(root, recovered.folder, recovered.release_id) as folder:
+                proof = store.verify_asset(folder, recovered.assets[0])
+                assert proof.code == "verified"
+                completed = store.completed_record(recovered.assets[0], proof)
+                reconciled = replace(recovered, assets=(completed,))
+                store.commit_release(folder, reconciled)
+                record = m.ReleaseRecord(reconciled.release_id, reconciled.tag, reconciled.folder, reconciled.assets)
+                store.commit_index(root, m.ProjectIndex(repository, (record,)), None)
+                assert store.verify_asset(folder, completed).code == "verified"
+            loaded = store.load_project_state(root)
+            assert not loaded.issues and loaded.unindexed == ()
+            assert loaded.releases == (reconciled,) and loaded.index.repository == repository
+    assert (tmp_path / FOLDER / original.assets[0].saved_name).read_bytes() == DATA
+
+
+def test_r3b_accepted_limitation_case_changed_reconciliation_identity(tmp_path):
+    """ACCEPTED LIMITATION: callers must adopt recovered repository spelling."""
+    original = _r3b_completed_recovery_fixture(tmp_path)
+    path = tmp_path / FOLDER / "release.json"
+    before = path.read_bytes()
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with store.project_writer(root):
+            state = store.load_project_state(root)
+            assert state.index is None and state.unindexed == (original,)
+            recovered = state.unindexed[0]
+            different = RepositoryTarget(recovered.repository.owner.lower(), recovered.repository.repo.lower())
+            assert different.repo_key == recovered.repository.repo_key and different != recovered.repository
+            with store.ensure_release(root, recovered.folder, recovered.release_id) as folder:
+                with pytest.raises(winfs.ArchiveConflictError, match="^identity$"):
+                    store.commit_release(folder, replace(recovered, repository=different))
+    assert path.read_bytes() == before
+    assert (tmp_path / FOLDER / original.assets[0].saved_name).read_bytes() == DATA

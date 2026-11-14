@@ -1,12 +1,15 @@
 """Handle-anchored asset persistence on an explicitly authorized NTFS root.
 
-Publication never replaces an existing destination. Verification describes the
-bytes observed through one pinned read handle at a point in time; closed files
-can subsequently change. File flushes provide no directory/power-loss guarantee.
-BEST-EFFORT: held manifests deny in-place writes. Non-cooperating delete-sharing
-rename replacements cannot be prevented; a replacement race is detected after
-publication by checking whether the validated object was unlinked. These checks
-are best-effort, not an atomic filesystem compare-and-replace.
+Asset publication never replaces an existing destination; temporary creation is
+exclusive. Verification describes the bytes observed through one pinned read
+handle at a point in time; closed files can subsequently change. File flushes
+provide no directory/power-loss guarantee. Held manifests deny in-place writes.
+A non-cooperating process can replace a manifest between validation and
+publication, and CoveArchive may overwrite that replacement without detecting
+the conflict. Unlink checks before and after publication are best-effort: they
+narrow the window, are not an atomic compare-and-replace, and do not detect every
+foreign replacement. This is an accepted limitation for CA-S5.1; guaranteed
+compare-and-replace is not provided.
 """
 
 from collections.abc import Iterable, Iterator
@@ -50,10 +53,18 @@ class Recovery:
 
 @contextmanager
 def ensure_project(root: ArchiveRoot, repository: RepositoryTarget) -> Iterator[Directory]:
-    """Pin both project ancestors for the entire caller operation."""
+    """Pin project ancestors, reusing ASCII case differences without renaming.
+
+    GitHub owner/repo names are ASCII; ambiguous case-equivalent entries are
+    rejected even when one matches exactly. A unique variant keeps its established
+    on-disk spelling; non-ASCII names require exact spelling.
+    New directories use the requested spelling. Persisted manifest spelling owns
+    repository identity: callers adopt state.index.repository before committing;
+    commit identity checks remain exact.
+    """
     owner, repo = naming.project_folders(repository.owner, repository.repo)
-    with root.open_dir(owner, create=True) as owner_dir:
-        with owner_dir.open_dir(repo, create=True) as project:
+    with root.open_dir(owner, create=True, fold_case=True) as owner_dir:
+        with owner_dir.open_dir(repo, create=True, fold_case=True) as project:
             project.role = "project"
             yield project
 
@@ -76,6 +87,8 @@ def verify_asset(directory: Directory, record: AssetRecord) -> Verification:
             info = file.info()
             if info.links != 1:
                 return Verification("multiple_links", record, size=info.size)
+            if info.size != record.size:
+                return Verification("size_mismatch", record, None, info.size)
             digest, size = hashlib.sha256(), 0
             while chunk := file.read():
                 digest.update(chunk)
@@ -176,10 +189,26 @@ def recover(directory: Directory) -> Recovery:
 
 @dataclass(frozen=True)
 class ProjectState:
+    """Loaded metadata, including detect-only unindexed manifests as untrusted claims.
+
+    Recovered completed/local_sha256 fields prove nothing about asset bytes.
+    Reconciliation requires verify_asset on actual bytes and re-committing release
+    and index metadata through the normal project writer/CAS flow. Loading never
+    repairs or rebuilds the index and does not authorize completion. With a valid
+    index, recovered repository spelling must match exactly. Otherwise repository
+    identity is an unverified claim: adopt the recovered spelling for commits;
+    a case-only different spelling cannot pass the exact commit identity checks.
+    Retention follows sorted folder-name scan order, results are sorted by release
+    id, and duplicate ids consume no retention capacity. Only ids/folders are kept
+    for overflow/duplicates; at most MAX_RELEASES parsed candidates plus the single
+    iteration-local manifest are held. Later duplicates free retained slots.
+    """
+
     index: m.ProjectIndex | None
     releases: tuple[m.ReleaseManifest, ...]
     index_sha256: str | None
     issues: tuple[tuple[str, str], ...]
+    unindexed: tuple[m.ReleaseManifest, ...] = field(default=(), kw_only=True)
 
 
 _WRITERS = ContextVar("archive_writers", default=())
@@ -253,7 +282,23 @@ def _issue(exc):
 
 
 def load_project_state(project: Directory) -> ProjectState:
-    """Load exact bytes and report inconsistencies without modifying anything."""
+    """Load metadata and detect validated unindexed manifests without modifying disk.
+
+    Unindexed manifests are untrusted claims: completed/local_sha256 fields prove
+    nothing. Reconciliation requires verify_asset on actual bytes and release/index
+    re-commit through the normal project writer/CAS flow before counting assets as
+    verified. Nothing is written, deleted, renamed, quarantined, or rebuilt here.
+    Missing/directory indexes permit scanning; corrupt/unsupported indexes return
+    early without scanning. With a valid index, any repository spelling difference
+    (including case only) is a consistency issue and prevents recovery. Without a
+    valid index, adopt the recovered manifest's repository spelling, an unverified
+    claim, for reconciliation: exact commit identity checks reject case changes.
+    Retain eligible candidates in sorted folder-name scan order up to MAX_RELEASES,
+    plus one iteration-local manifest; return them sorted by release id. Duplicate
+    ids free retained slots for subsequent candidates and receive consistency, never
+    limit. Unique overflow receives limit; only ids/folders survive for discarded
+    manifests. recover() remains a separate temp-cleanup operation.
+    """
     releases, issues = [], []
     try:
         index, raw = _read_document(project, naming.INDEX_FILENAME)
@@ -278,31 +323,54 @@ def load_project_state(project: Directory) -> ProjectState:
         except (ArchiveError, m.UnsupportedVersionError) as exc:
             issues.append((record.folder, _issue(exc)))
     known = {record.folder for record in records}
+    indexed_ids = {record.release_id for record in records}
+    candidates, seen = {}, {}
     for folder in sorted(project.names()):
         suffix = re.search(r"--([0-9]+)$", folder)
         if folder in known or suffix is None or not naming.is_release_folder(folder, int(suffix[1])):
             continue
         try:
             with project.open_dir(folder) as directory:
-                _read_document(directory, naming.RELEASE_FILENAME)
+                release, _ = _read_document(directory, naming.RELEASE_FILENAME)
             issues.append((folder, "unindexed_release"))
+            if (release.folder != folder or release.release_id != int(suffix[1])
+                    or (index is not None and release.repository != index.repository)
+                    or release.release_id in indexed_ids):
+                issues.append((folder, "consistency"))
+                continue
+            folders = seen.setdefault(release.release_id, [])
+            folders.append(folder)
+            if len(folders) > 1:
+                candidates.pop(release.release_id, None)
+            elif len(candidates) < m.MAX_RELEASES:
+                candidates[release.release_id] = release
         except (ArchiveError, m.UnsupportedVersionError) as exc:
             if exc.code != "missing":
                 issues.append((folder, _issue(exc)))
+    for release_id, folders in seen.items():
+        if len(folders) > 1:
+            issues.extend((folder, "consistency") for folder in folders)
+        elif release_id not in candidates:
+            issues.append((folders[0], "limit"))
+    unindexed = sorted(candidates.values(), key=lambda release: release.release_id)
     token = None if raw is None else hashlib.sha256(raw).hexdigest()
-    return ProjectState(index, tuple(releases), token, tuple(issues))
+    return ProjectState(index, tuple(releases), token, tuple(issues), unindexed=tuple(unindexed))
 
 
 def _replace_document(directory, name, raw, held):
     with directory.create_temp() as temporary:
         temporary.write(raw)
         temporary.flush()
+        # Best-effort pre-check; a foreign replacement can still race publication.
         if held is not None and held.unlinked():
             raise ArchiveConflictError("destination_changed")
         try:
             temporary.rename(directory, name, replace=held is not None, metadata=True)
         except ArchiveConflictError as exc:
             raise ArchiveConflictError("destination_changed") from exc
+        # A detected rename-aside conflict is reported only after publication.
+        # POSIX replacement can unlink held before publication and escape detection;
+        # neither check provides an atomic compare-and-replace (CA-S5.1 limitation).
         if held is not None and not held.unlinked():
             raise ArchiveConflictError("destination_changed")
 

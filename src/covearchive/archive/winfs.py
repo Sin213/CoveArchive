@@ -295,7 +295,7 @@ class Handle:
         fields.FileNameLength = len(encoded)
         C.memmove(C.addressof(data) + _Rename.FileName.offset, encoded, len(encoded))
         io = _IO()
-        _ntcheck(_ntset(self._get(), C.byref(io), data, size, 65))
+        _ntcheck(_ntset(self._get(), C.byref(io), data, len(data), 65))
         self.name = name
         self._temporary = False
 
@@ -340,7 +340,16 @@ class Directory(Handle):
             opened.close()
             raise
 
-    def open_dir(self, name, *, create=False):
+    def open_dir(self, name, *, create=False, fold_case=False):
+        if fold_case:
+            _component(name, directory=True)
+            if name.isascii():
+                matches = [entry for entry in self.names()
+                           if entry.isascii() and entry.casefold() == name.casefold()]
+                if len(matches) > 1:
+                    raise ArchiveConflictError("case_alias")
+                if matches:
+                    name = matches[0]
         return self._open(name, directory=True, disposition=3 if create else 1,
                           access=0x100081, share=3)
 

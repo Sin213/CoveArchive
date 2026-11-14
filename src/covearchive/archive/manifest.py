@@ -1,8 +1,10 @@
 """Validated, deterministic archive metadata; no filesystem or network access.
 
 archive-index.json is authoritative for repository identity and the established
-release-folder/saved-name registry. release.json is the per-release description
-for reconstruction (CA-S5); index asset records are a derived copy for planning.
+release-folder/saved-name registry. release.json is per-release metadata; index
+asset records are a derived copy for planning. CA-S5.1 returns validated unindexed
+manifests for detect-only recovery: nothing repairs or rebuilds the index, and
+recovered claims require actual-byte verification and the normal writer/CAS flow.
 ACTUAL FILE BYTES alone establish integrity: completed in JSON is a CLAIM, never
 proof. A corrupt index must never authorize deletion.
 """

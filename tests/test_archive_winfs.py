@@ -196,3 +196,148 @@ def test_held_manifest_posix_replace_unlinks_validated_handle(tmp_path):
             assert held.unlinked()
             assert held.read_bounded(10) == b"old"
     assert (tmp_path / "release.json").read_bytes() == b"new"
+
+
+@pytest.mark.parametrize("name", ["a", "1", "\u00e9", "ab", "\U0001F600", "a\U0001F600"])
+def test_rename_utf16_lengths_real_ntfs(tmp_path, name):
+    payload = b"synthetic UTF-16 rename payload"
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with root.create_temp() as temporary:
+            temporary.write(payload)
+            temporary.rename(root, name)
+            assert temporary.name == name
+            temporary.rewind()
+            assert temporary.read() == payload
+        assert os.listdir(tmp_path) == [name]
+    assert (tmp_path / name).read_bytes() == payload
+    assert os.listdir(tmp_path) == [name]
+
+
+def test_f2_fold_case_opt_in_preserves_disk_name(tmp_path):
+    (tmp_path / "Established").mkdir()
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with pytest.raises(winfs.ArchiveConflictError, match="case_alias"):
+            root.open_dir("established")
+        assert not root._children
+        with root.open_dir("established", fold_case=True) as child:
+            assert child.name == "Established"
+        assert not root._children
+    assert os.listdir(tmp_path) == ["Established"]
+
+
+@pytest.mark.parametrize("actual", ["Different", "ESTABL~1", "Establishe\u0301d"])
+def test_f2_fold_rejects_other_disk_names_without_leak(tmp_path, monkeypatch, actual):
+    (tmp_path / "Established").mkdir()
+    monkeypatch.setattr(winfs.Handle, "disk_name", lambda self: actual)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with pytest.raises(winfs.ArchiveConflictError, match="case_alias"):
+            root.open_dir("established", fold_case=True)
+        assert not root._children
+    assert os.listdir(tmp_path) == ["Established"]
+
+
+def test_f2_fold_rejects_ambiguity_without_leak(tmp_path, monkeypatch):
+    (tmp_path / "Established").mkdir()
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        monkeypatch.setattr(root, "names", lambda: ("Established", "ESTABLISHED"))
+        with pytest.raises(winfs.ArchiveConflictError, match="case_alias"):
+            root.open_dir("established", fold_case=True)
+        assert not root._children
+    assert os.listdir(tmp_path) == ["Established"]
+
+
+@pytest.mark.parametrize("name", ["..", "a/b", "C:\\bad", "CON", "bad.", "bad "])
+def test_f2_fold_unsafe_components_before_open(tmp_path, name):
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with pytest.raises(winfs.ArchiveUnsafePathError, match="^component$"):
+            root.open_dir(name, create=True, fold_case=True)
+        assert not root._children
+    assert os.listdir(tmp_path) == []
+
+
+def test_f2_fold_rejects_real_short_alias(tmp_path):
+    from pathlib import Path
+    long_path = tmp_path / "EstablishedLongDirectory"
+    long_path.mkdir()
+    short_path = ctypes.create_unicode_buffer(32768)
+    get_short = winfs._kernel.GetShortPathNameW
+    get_short.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    get_short.restype = ctypes.c_uint32
+    length = get_short(str(long_path), short_path, len(short_path))
+    assert 0 < length < len(short_path)
+    alias = Path(short_path.value).name
+    if alias == long_path.name:
+        pytest.skip("8.3 alias generation is disabled for this directory")
+    assert alias.casefold() != long_path.name.casefold()
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with pytest.raises(winfs.ArchiveConflictError, match="case_alias"):
+            root.open_dir(alias, fold_case=True)
+        assert not root._children
+    assert os.listdir(tmp_path) == [long_path.name]
+
+
+def _r3a_enable_case_sensitive(directory):
+    try:
+        result = subprocess.run(["fsutil.exe", "file", "setCaseSensitiveInfo", str(directory), "enable"],
+                                capture_output=True, text=True, timeout=15)
+    except FileNotFoundError:
+        pytest.skip("fsutil.exe is unavailable; case-sensitive NTFS fixture cannot be enabled")
+    print(f"CASE-SENSITIVE NTFS SETUP: {directory}; exit={result.returncode}; {result.stdout}{result.stderr}")
+    if result.returncode:
+        output = (result.stdout + result.stderr).lower()
+        if any(marker in output for marker in ("not supported", "not implemented", "access is denied", "privilege")):
+            pytest.skip(f"case-sensitive NTFS feature unavailable: {output}")
+        pytest.fail(f"case-sensitive NTFS setup failed with exit {result.returncode}: {output}")
+
+
+@pytest.mark.parametrize("requested", ["Owner", "owner", "OWNER"])
+def test_r3a_real_case_sensitive_ambiguity_rejected(tmp_path, requested):
+    parent = tmp_path / "sensitive"
+    parent.mkdir()
+    _r3a_enable_case_sensitive(parent)
+    for name in ("Owner", "owner"):
+        (parent / name).mkdir()
+    assert sorted(os.listdir(parent)) == ["Owner", "owner"]
+    before = os.listdir(parent)
+    with winfs.ArchiveRoot.open(str(parent)) as root:
+        with pytest.raises(winfs.ArchiveConflictError, match="^case_alias$"):
+            root.open_dir(requested, create=True, fold_case=True)
+        assert not root._children
+    assert os.listdir(parent) == before
+
+
+def test_r3a_real_case_sensitive_unique_case_reused(tmp_path):
+    parent = tmp_path / "sensitive"
+    parent.mkdir()
+    _r3a_enable_case_sensitive(parent)
+    (parent / "Owner").mkdir()
+    with winfs.ArchiveRoot.open(str(parent)) as root:
+        with root.open_dir("Owner") as established:
+            before = established.info()
+        with root.open_dir("OWNER", create=True, fold_case=True) as reopened:
+            after = reopened.info()
+            assert reopened.name == "Owner"
+            assert (after.volume_serial, after.file_id) == (before.volume_serial, before.file_id)
+        assert not root._children
+    assert os.listdir(parent) == ["Owner"]
+
+
+@pytest.mark.parametrize("requested", ["established", "Established", "ESTABLISHED"])
+def test_r3a_names_ambiguity_including_exact_spelling(tmp_path, monkeypatch, requested):
+    (tmp_path / "Established").mkdir()
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        monkeypatch.setattr(root, "names", lambda: ("Established", "ESTABLISHED"))
+        with pytest.raises(winfs.ArchiveConflictError, match="^case_alias$"):
+            root.open_dir(requested, fold_case=True)
+        assert not root._children
+    assert os.listdir(tmp_path) == ["Established"]
+
+
+def test_r3a_non_ascii_case_variant_remains_strict(tmp_path):
+    established, requested = "\u00c9stablished", "\u00e9stablished"
+    (tmp_path / established).mkdir()
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with pytest.raises(winfs.ArchiveConflictError, match="^case_alias$"):
+            root.open_dir(requested, create=True, fold_case=True)
+        assert not root._children
+    assert os.listdir(tmp_path) == [established]
