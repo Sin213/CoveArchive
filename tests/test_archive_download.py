@@ -36,6 +36,28 @@ def test_D01_download_and_persist(rig):
     root,server=rig
     assert (folder(root)/"app.zip").read_bytes()==BODY
 
+@pytest.mark.parametrize('observe',[False,True])
+def test_Q33_progress_counts_and_default(rig,observe):
+    root,server=rig; data=bytes(range(256))*1024; selected=asset(len(data)); counts=[]
+    server.routes['/cdn']=(200,{'Content-Length':str(len(data))},data)
+    options={'progress':lambda received,total:counts.append((received,total))} if observe else {}
+    result=run(rig,selected,**options)
+    assert result.status.value=='ARCHIVED' and (folder(root)/'app.zip').read_bytes()==data
+    if observe:
+        assert len(counts)>=4 and counts[-1]==(len(data),len(data))
+        assert all(a[0]<b[0] for a,b in zip([(0,len(data))]+counts,counts))
+        assert all(total==len(data) for received,total in counts)
+    else: assert not counts
+    no_temps(root)
+
+def test_Q16_progress_cancel_no_publication(rig):
+    root,server=rig; data=bytes(range(256))*1024; counts=[]
+    server.routes['/cdn']=(200,{'Content-Length':str(len(data))},data)
+    result=run(rig,asset(len(data)),progress=lambda n,total:counts.append(n),cancel=lambda:bool(counts))
+    assert result.status.value=='CANCELLED' and len(counts)==1 and counts[0]<len(data)
+    assert not (folder(root)/'app.zip').exists() and not (project(root)/'archive-index.json').exists()
+    no_temps(root)
+
 
 def test_D02_D07_D09_D17_identity_names_hash_and_consistency(rig):
     root,server=rig; selected=replace(asset(),sha256=hashlib.sha256(BODY).hexdigest())

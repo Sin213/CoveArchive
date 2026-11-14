@@ -261,9 +261,11 @@ def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=No
                 url=moved; visited.add(url); hops += 1; continue
             rate = status == 429 or (status == 403 and ("Retry-After" in values or values.get("X-RateLimit-Remaining") == "0"))
             if rate:
-                raw = values.get("Retry-After","")
-                wait = min(86400,int(raw)) if re.fullmatch(r"[0-9]{1,15}",raw) else 60
-                raise DownloadError("rate_limited",retry_after_seconds=max(1,wait),retryable=True) from None
+                raw = values.get("Retry-After",""); reset = values.get("X-RateLimit-Reset",""); waits=[]
+                if re.fullmatch(r"[0-9]{1,15}",raw): waits.append(int(raw))
+                if values.get("X-RateLimit-Remaining")=="0" and re.fullmatch(r"[0-9]{1,15}",reset): waits.append(int(reset)-int(time.time()))
+                wait = max(waits) if waits else 60
+                raise DownloadError("rate_limited",retry_after_seconds=max(1,min(86400,wait)),retryable=True) from None
             if url != entry and status in (400,403,410):
                 if refreshed: raise DownloadError("expired_url",retryable=True) from None
                 response.close(); response=None

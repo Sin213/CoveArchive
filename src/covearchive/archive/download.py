@@ -5,7 +5,7 @@ MISMATCH, CANCELLED, UPSTREAM_REMOVED, RECONCILE_REQUIRED, FAILED.
 Integrity is PUBLISHER_VERIFIED or LOCAL_HASH_ONLY, derived from AssetRecord.
 Empty directories may remain after failure. F1 manifest replacement limitations
 remain; repository identity is checked here before asset/metadata writes (F3).
-No queue, GUI, resume, background work, or private repository authentication.
+This module has no queue/GUI/resume/background work or private-repository auth; the optional progress callback reports bytes received (queue lives in covearchive.queue).
 """
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -140,8 +140,16 @@ def _filesystem_code(error):
     return "filesystem_error"
 
 
+def _observed(chunks, progress, total):
+    received = 0
+    for chunk in chunks:
+        received += len(chunk)
+        progress(received,total)
+        yield chunk
+
+
 def archive_asset(repository, release, asset, archive_root, *, policy=None, session=None,
-                  cancel=None, sleep=time.sleep, clock=time.monotonic):
+                  cancel=None, sleep=time.sleep, clock=time.monotonic, progress=None):
     """Archive one identity-bound asset; expected failures return URL-free results.
 
     Completed JSON is always reverified. Planned files without publisher hashes
@@ -241,6 +249,7 @@ def archive_asset(repository, release, asset, archive_root, *, policy=None, sess
                     if completed is None:
                         with open_asset_stream(repository,asset,policy=policy,session=session,cancel=cancel,sleep=sleep,clock=clock) as chunks:
                             result = replace(result,transferred=True)
+                            if progress is not None: chunks = _observed(chunks,progress,asset.size)
                             outcome = store.write_asset(directory,record.saved_name,chunks,record.size,
                                 record.local_sha256 if record.status == "completed" else record.publisher_sha256)
                         published = outcome.code == "published"

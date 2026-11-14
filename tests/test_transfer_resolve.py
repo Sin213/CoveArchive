@@ -142,6 +142,13 @@ def test_api_status(server, status, headers, code, wait):
     assert caught.value.code == code and caught.value.retry_after_seconds == wait
     assert len(server.requests) == 1
 
+@pytest.mark.parametrize('headers,wait',[({},60),({'Retry-After':'20'},20),({'X-RateLimit-Remaining':'0','X-RateLimit-Reset':'130'},30),({'X-RateLimit-Remaining':'0','X-RateLimit-Reset':'90'},1),({'X-RateLimit-Remaining':'0','X-RateLimit-Reset':'9999999'},86400),({'X-RateLimit-Reset':'130'},60),({'Retry-After':'20','X-RateLimit-Remaining':'0','X-RateLimit-Reset':'130'},30)])
+def test_Q19_S7_reset_header(server,monkeypatch,headers,wait):
+    monkeypatch.setattr(r.time,'time',lambda:100)
+    server.routes['/repos/Owner/Repo/releases/assets/7']=(429,headers,b'')
+    with pytest.raises(r.DownloadError) as exc: consume(server)
+    assert exc.value.retry_after_seconds==wait
+
 @pytest.mark.parametrize("status", [400,403,410])
 def test_expiry_refresh_once(server, status):
     count = []

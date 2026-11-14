@@ -6,7 +6,7 @@ they control, with an index that can support later verification and rescanning.
 
 ## Status
 
-**pre-alpha, slice CA-S7** - secure selected-asset download-to-archive backend; scanner GUI unchanged.
+**pre-alpha, slice CA-S8** - persistent archive queue and bounded scheduler backend; scanner GUI unchanged.
 
 The earlier pre-alpha, slice CA-S3 delivered project bootstrap, a GitHub URL classifier,
 and a release-asset format matcher. CA-S7 adds the selected-asset archive backend.
@@ -16,7 +16,7 @@ supported asset suffixes. An offline test suite covers both components.
 The GUI uses CA-S2 release discovery through the official GitHub REST API. Expand
 releases to inspect all assets; format and prerelease filters run locally. Release
 notes are not shown. The GUI has no download/archive controls; the backend now downloads
-and archives selected assets. SQLite and queue integration are not implemented.
+and archives selected assets through the persistent SQLite queue backend.
 
 Python 3.12+, requests (>=2.32,<3), and PySide6 (>=6.11,<7) are required. From the
 source tree, launch `python run_covearchive.py`. The developer diagnostic
@@ -118,16 +118,7 @@ A non-cooperating process can replace a manifest between validation and publicat
 - CA-S5.1 limitation: recovery reconciliation must adopt the persisted repository spelling; case-only different spelling is rejected by exact commit identity checks, even though it identifies the same GitHub repository.
 - Informational: newer-schema manifests are quarantined only by an explicit call; the planner's `digest_added` path never compares a new publisher digest with the local hash; a remote asset named like a temporary-file pattern passes the planner but can never be written.
 
-**Future queue defaults (CA-S8 design only, not implemented)**
-
-- 2 concurrent downloads.
-- 4 connections per download, subject to server range support.
-- Global speed limit unlimited by default and configurable.
-- Optional random start delay disabled by default; 1-5 s jitter when enabled.
-- Honor authoritative server cooldowns.
-- Bounded exponential backoff with jitter.
-- API request pacing separate from asset transfer scheduling.
-- No bot-detection evasion and no circumvention of GitHub restrictions.
+CA-S8 queue defaults and limitations are documented below; no bot-detection evasion or circumvention of GitHub restrictions is provided.
 
 ## FUTURE GUI workflow — not implemented
 
@@ -156,8 +147,8 @@ The standalone backend owns an unprivileged aria2 1.37.x child: authenticated lo
 Strict `.part` names stay in work_dir: no overwrite, automatic rename, transfer-data deletion, archive publication or manifest writes. Only the final work_dir component is checked for reparse points; CA-S7's verified staging directory owns ancestry.
 Explicit resume requires expected size and regular data/control files. aria2 cannot detect same-size changed content or tampered/truncated partials. If-Range helps; CA-S7 MUST fully hash every completed download. Completion is transport only, never local/publisher verification.
 aria2 follows cross-origin redirects; no redirect-host enforcement is claimed. CA-S7 uses a separate redirect-controlled streaming backend; aria2 is excluded from its production path because actual transfer redirects cannot be constrained.
-No engine retries/backoff. CA-S8 owns optional 1-5 s start jitter (default off), server cooldowns, bounded exponential backoff with jitter, and no bot-detection evasion.
-Queue persistence and GUI download integration remain FUTURE. CA-S7 supplies secure URL resolution, hashing and archive publication; its treatment of the unchanged CA-S5.1 F1/F3/L2 carryovers is described below. Disk-full injection is tested; actual disk exhaustion is not verified.
+No engine retries/backoff. CA-S8 owns server cooldowns and bounded exponential backoff with jitter; start delay is deferred to CA-S9.
+Queue persistence is available; GUI download integration remains FUTURE. CA-S7 supplies secure URL resolution, hashing and archive publication; its treatment of the unchanged CA-S5.1 F1/F3/L2 carryovers is described below. Disk-full injection is tested; actual disk exhaustion is not verified.
 Tests may set the test-only `COVEARCHIVE_TEST_ARIA2` absolute executable override. Hard-killed parents can leave an ACL-protected private config after the child exits; stale-directory sweeping is FUTURE work.
 
 ## CA-S7: secure download-to-archive pipeline
@@ -166,8 +157,8 @@ Tests may set the test-only `COVEARCHIVE_TEST_ARIA2` absolute executable overrid
 uploaded asset: pure planning, fresh API resolution, bounded streaming to an
 exclusive opaque NTFS temp, size/SHA-256 verification, no-replace publication,
 then release.json followed by archive-index.json. Assets remain in per-release folders.
-Anonymous requests only: private repositories are unsupported. No queue, GUI download
-controls, background scheduler, or CA-S8 Auto-Archive is implemented.
+Anonymous requests only: private repositories are unsupported. CA-S8 supplies the queue
+backend; GUI download controls, a scheduler daemon and repository monitoring/Auto-Archive are not implemented.
 
 Production uses HTTPS with TLS verification, no credentials/cookies, no environment
 proxies/netrc/CA overrides, no automatic redirects, and identity byte encoding.
@@ -239,6 +230,53 @@ F1 best-effort manifest replacement and power-loss limits remain. F3 identity ch
 are closed in this pipeline only; the store is unchanged. The store's L2 size-only
 planned-record path is never used to authorize completion. Neither transport completion
 nor a local hash alone implies publisher verification.
+
+## CA-S8: persistent archive queue
+
+`covearchive.queue` exposes `QueueStore` and `QueueRunner`; callers drive `run_pending()`.
+`QueueStore()` uses `%LOCALAPPDATA%\CoveArchive\queue.sqlite3`; `QueueStore(path)` selects an explicit file.
+Schema version 1 uses rollback journal `DELETE`, `synchronous=FULL`, and no WAL.
+The validated Windows runtime uses SQLite 3.49.1; SQLite is supplied by Python, not bundled separately here.
+States and allowed transitions (controls/claim/finish enforce ownership as appropriate):
+
+| From | To |
+| --- | --- |
+| QUEUED, RETRY_WAIT | RUNNING, PAUSED, CANCELLED |
+| RUNNING | COMPLETED, RETRY_WAIT, FAILED, PAUSED, CANCELLED, QUEUED |
+| PAUSED | QUEUED, CANCELLED |
+| COMPLETED, FAILED, CANCELLED | QUEUED |
+
+Identity combines GitHub repository key, release/asset IDs and normalized archive root.
+Aliases that string normalization cannot canonicalize (8.3 short names, junctions, trailing dots/spaces) rely on CA-S5's project lock and may fail as retryable busy (automatic retry capped at one).
+Active duplicates reuse a row; COMPLETED re-enqueue queues CA-S7 re-verification.
+FAILED/CANCELLED duplicates stay unchanged until explicit `retry()` resets the attempt count.
+Claims are atomic FIFO transactions, with at most one RUNNING job per project/root.
+Defaults allow two active workers. RunnerLock permits one runner per queue file;
+the OS releases it at process death. Archive files are never modified by queue storage.
+`pause()` stops pending jobs immediately and requests cooperative stop of owned active jobs.
+`resume()` queues PAUSED jobs, preserving cooldown; `cancel()` requests cancellation.
+`retry()` queues FAILED/CANCELLED jobs. A successful archive result wins a racing stop request.
+Active pause/cancel intent is persisted before signaling and honored at restart without consuming an attempt.
+Defaults allow five attempts: 5-300 s exponential backoff plus capped jitter;
+Retry-After is honored exactly. Permanent codes are never retried; `disk_full` requires explicit retry.
+Catalog and asset requests share a persisted queue-wide GitHub cooldown; claims pause until expiry, exposed by `snapshot().cooldown_until`.
+The download path honors X-RateLimit-Reset when Remaining is zero, using the larger header wait; 60 s is the fallback only when neither usable header is present.
+Receiving a 429 and committing its cooldown are not crash-atomic; daemon workers may outlive shutdown, and wall-clock changes can shorten or lengthen cooldowns.
+`manifest_commit_incomplete` can mask disk-full/permission failures and is retried automatically at most once.
+Runner startup recovers interrupted RUNNING rows; SQLite recovers hot rollback journals.
+Each interrupted run consumes one attempt; exhausting the attempt limit leaves FAILED with `interrupted`.
+CA-S7 always re-verifies archive truth; queue COMPLETED is never proof of intact bytes.
+Progress and measured speed remain in memory; retry scheduling uses wall-clock timestamps.
+Clock rewind can delay retries. Restarted incomplete transfers start from byte zero: no byte-level resume.
+Bandwidth throttling and start delay are deferred to CA-S9. No queue GUI, scheduler daemon,
+repository monitoring or Auto-Archive is provided.
+CA-S2 GitHub catalog discovery is not cancellable: controls/shutdown take effect after it returns.
+Final CA-S7 filesystem phases are not cancellable. An uncommitted published file without
+a publisher digest is downloaded again by CA-S7 to establish proof.
+Shutdown joins daemon workers cooperatively and may report unresolved job IDs;
+the queue lock stays held until workers and the run loop finish. No forced thread kill is used.
+After a shutdown timeout, the last finished worker releases the lock automatically once the run loop has exited.
+Crash tests demonstrate process-restart behavior, not power-loss durability.
 
 ## Development
 
