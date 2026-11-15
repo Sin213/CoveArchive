@@ -14,11 +14,16 @@ if __name__ == "__main__":
         from covearchive.scan_worker import main
         os._exit(main())
     elif "--smoke-test" in sys.argv:
+        import tempfile, time
+        temporary = tempfile.TemporaryDirectory(); os.environ["LOCALAPPDATA"] = temporary.name
         from PySide6.QtWidgets import QApplication
         from covearchive.ui.window import MainWindow
         app = QApplication(sys.argv)
         window = MainWindow(LAUNCHER); window.show(); app.processEvents(); window.close()
-        raise SystemExit(0)
+        deadline = time.monotonic()+8
+        while not window.bridge.closed and time.monotonic()<deadline: app.processEvents(); time.sleep(0.005)
+        closed = window.bridge.closed; temporary.cleanup()
+        raise SystemExit(0 if closed else 1)
     else:
         from covearchive.ui.window import main
         raise SystemExit(main(launcher=LAUNCHER))

@@ -446,10 +446,10 @@ def test_invalid_target_rejected_before_request(rig, target):
 def test_catalog_selection_metadata_and_no_further_requests(rig):
     names = ["app.AppImage", "app.TAR.GZ", "app.TAR", "app.DMG", "app.ZIP", "app.7Z"]
     assets = [asset(i + 1, name, digest="SHA256:" + "Ab" * 32) for i, name in enumerate(names)]
-    assets += [asset(7, "pending.zip", state="new"), asset(8, "app.exe", digest="sha512:opaque")]
+    assets += [asset(7, "pending.zip", state="new"), asset(8, "app.rar", digest="sha512:opaque")]
     client, session, _ = rig([FakeResponse(body=[release(1, assets=assets, body="<script>untrusted</script>",
         tarball_url="tar", zipball_url="zip"), release(2, draft=True), release(3, prerelease=True),
-        release(4, assets=[]), release(5, assets=[asset(name="only.exe")])])])
+        release(4, assets=[]), release(5, assets=[asset(name="only.rar")])])])
     catalog = discover(client, ReleaseTagTarget("Owner", "Repo", "v3"))
     result = select_releases(catalog)
     assert [r.release.id for r in result.releases] == [1, 4, 5]

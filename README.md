@@ -6,7 +6,7 @@ they control, with an index that can support later verification and rescanning.
 
 ## Status
 
-**pre-alpha, slice CA-S8** - persistent archive queue and bounded scheduler backend; scanner GUI unchanged.
+**pre-alpha, slice CA-S9A** - GUI archive workflow and saved Smart Build Filters.
 
 The earlier pre-alpha, slice CA-S3 delivered project bootstrap, a GitHub URL classifier,
 and a release-asset format matcher. CA-S7 adds the selected-asset archive backend.
@@ -15,8 +15,8 @@ supported asset suffixes. An offline test suite covers both components.
 
 The GUI uses CA-S2 release discovery through the official GitHub REST API. Expand
 releases to inspect all assets; format and prerelease filters run locally. Release
-notes are not shown. The GUI has no download/archive controls; the backend now downloads
-and archives selected assets through the persistent SQLite queue backend.
+notes are not shown. Browse selects builds and destinations; Queue controls the persistent
+SQLite archive queue through the production CA-S7 pipeline.
 
 Python 3.12+, requests (>=2.32,<3), and PySide6 (>=6.11,<7) are required. From the
 source tree, launch `python run_covearchive.py`. The developer diagnostic
@@ -57,6 +57,8 @@ for ASCII letters:
 - `.dmg` — DMG
 - `.zip` — ZIP
 - `.7z` — 7z
+- `.exe` - EXE (opt-in; archived only, never launched or installed)
+- `.msi` - MSI (opt-in; archived only, never launched or installed)
 
 Matching uses the final filename suffix and requires a non-empty stem.
 An optional enabled-format selection limits which actual extensions match.
@@ -120,11 +122,10 @@ A non-cooperating process can replace a manifest between validation and publicat
 
 CA-S8 queue defaults and limitations are documented below; no bot-detection evasion or circumvention of GitHub restrictions is provided.
 
-## FUTURE GUI workflow — not implemented
+## GUI archive workflow and saved build filters
 
-Discovery and filtering are available in the GUI. Selected-asset downloading and
-archiving are available through the CA-S7 backend API. Destination selection and
-the remaining GUI workflow are FUTURE, not implemented:
+Use Browse to discover releases, preview matches, check builds and choose a local root.
+Select Matching checks eligible matches; Clear Selection clears checks. Archive Selected queues only checked AND currently eligible assets; Queue shows progress.
 
 1. Paste a GitHub repository or releases URL.
 2. Discover releases through the official GitHub REST API.
@@ -135,8 +136,18 @@ the remaining GUI workflow are FUTURE, not implemented:
 7. Resume interrupted work.
 8. Rescan for new releases without duplicating existing downloads.
 
+Smart Build Filters use comma-separated shell wildcards, matched ASCII case-insensitively.
+Includes are OR (empty means all); any exclude wins. `[,]` matches a literal comma.
+`*win*` also matches darwin: inspect the preview. Save rules explicitly per repository.
+Preferences live at `%LOCALAPPDATA%\CoveArchive\preferences.json`; corrupt/newer files are preserved and read-only.
+Pause stops pending jobs or requests a cooperative stop; Cancel stops work; Retry re-queues failed/cancelled jobs.
+Resume restarts an incomplete file from the beginning. Rate-limit waits happen automatically; Resume preserves attempts/cooldowns.
+Completion comes from the backend result. Queue completion is historical; files are re-verified only when re-queued.
+Pause and Close requests durable pause and waits for workers and the queue lock. Slow shutdown honestly reports still-active work.
+Opening the app never starts restored jobs: press Start Queue explicitly.
+
 CoveArchive is not a complete Git history backup.
-The planned workflow preserves selected release assets; it does not promise
+The workflow preserves selected release assets; it does not promise
 to mirror every part of a GitHub project.
 
 As a design rule, downloads are never automatically executed or extracted.
@@ -148,7 +159,7 @@ Strict `.part` names stay in work_dir: no overwrite, automatic rename, transfer-
 Explicit resume requires expected size and regular data/control files. aria2 cannot detect same-size changed content or tampered/truncated partials. If-Range helps; CA-S7 MUST fully hash every completed download. Completion is transport only, never local/publisher verification.
 aria2 follows cross-origin redirects; no redirect-host enforcement is claimed. CA-S7 uses a separate redirect-controlled streaming backend; aria2 is excluded from its production path because actual transfer redirects cannot be constrained.
 No engine retries/backoff. CA-S8 owns server cooldowns and bounded exponential backoff with jitter; start delay is deferred to CA-S9.
-Queue persistence is available; GUI download integration remains FUTURE. CA-S7 supplies secure URL resolution, hashing and archive publication; its treatment of the unchanged CA-S5.1 F1/F3/L2 carryovers is described below. Disk-full injection is tested; actual disk exhaustion is not verified.
+Queue persistence and GUI download integration are available. CA-S7 supplies secure URL resolution, hashing and archive publication; its treatment of the unchanged CA-S5.1 F1/F3/L2 carryovers is described below. Disk-full injection is tested; actual disk exhaustion is not verified.
 Tests may set the test-only `COVEARCHIVE_TEST_ARIA2` absolute executable override. Hard-killed parents can leave an ACL-protected private config after the child exits; stale-directory sweeping is FUTURE work.
 
 ## CA-S7: secure download-to-archive pipeline
@@ -158,7 +169,7 @@ uploaded asset: pure planning, fresh API resolution, bounded streaming to an
 exclusive opaque NTFS temp, size/SHA-256 verification, no-replace publication,
 then release.json followed by archive-index.json. Assets remain in per-release folders.
 Anonymous requests only: private repositories are unsupported. CA-S8 supplies the queue
-backend; GUI download controls, a scheduler daemon and repository monitoring/Auto-Archive are not implemented.
+backend and GUI download controls; a scheduler daemon and repository monitoring/Auto-Archive are not implemented.
 
 Production uses HTTPS with TLS verification, no credentials/cookies, no environment
 proxies/netrc/CA overrides, no automatic redirects, and identity byte encoding.
@@ -268,8 +279,8 @@ Each interrupted run consumes one attempt; exhausting the attempt limit leaves F
 CA-S7 always re-verifies archive truth; queue COMPLETED is never proof of intact bytes.
 Progress and measured speed remain in memory; retry scheduling uses wall-clock timestamps.
 Clock rewind can delay retries. Restarted incomplete transfers start from byte zero: no byte-level resume.
-Bandwidth throttling and start delay are deferred to CA-S9. No queue GUI, scheduler daemon,
-repository monitoring or Auto-Archive is provided.
+Bandwidth throttling and start delay remain deferred. A scheduler daemon, repository
+monitoring and Auto-Archive are not implemented.
 CA-S2 GitHub catalog discovery is not cancellable: controls/shutdown take effect after it returns.
 Final CA-S7 filesystem phases are not cancellable. An uncommitted published file without
 a publisher digest is downloaded again by CA-S7 to establish proof.

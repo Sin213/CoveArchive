@@ -121,7 +121,7 @@ def test_filename_must_be_a_string(filename):
 def test_supported_extensions_have_exact_type_and_order():
     assert isinstance(SUPPORTED_EXTENSIONS, tuple)
     assert SUPPORTED_EXTENSIONS == (
-        ".appimage", ".tar.gz", ".tar", ".dmg", ".zip", ".7z",
+        ".appimage", ".tar.gz", ".tar", ".dmg", ".zip", ".7z", ".exe", ".msi",
     )
 
 
@@ -135,8 +135,20 @@ def test_format_labels_cover_the_registry_and_are_read_only():
         ".dmg": "DMG",
         ".zip": "ZIP",
         ".7z": "7z",
+        ".exe": "EXE",
+        ".msi": "MSI",
     }
     with pytest.raises(TypeError):
         FORMAT_LABELS[".zip"] = "changed"
     with pytest.raises(TypeError):
         FORMAT_LABELS[".rar"] = "RAR"
+
+
+@pytest.mark.parametrize("filename,expected", [("app.EXE", ".exe"), ("app.MsI", ".msi"),
+    ("app.m\u017fi", None), ("app.ms\u0130", None), (".exe", None), (".msi", None)])
+def test_executable_formats_are_ascii_only_and_opt_in(filename, expected):
+    from covearchive import formats
+    assert match_extension(filename) == expected
+    assert formats.DEFAULT_EXTENSIONS == (".appimage", ".tar.gz", ".tar", ".dmg", ".zip", ".7z")
+    assert formats.OPT_IN_EXTENSIONS == (".exe", ".msi")
+    assert match_extension(filename, formats.DEFAULT_EXTENSIONS) is None

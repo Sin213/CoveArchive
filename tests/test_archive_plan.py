@@ -133,7 +133,7 @@ def test_P07_tag_change_keeps_exact_recorded_folder_and_tag():
     assert plan.index == index
 
 
-@pytest.mark.parametrize("assets,reason", [((), "no_assets"), (((1, "a.exe", "uploaded"),), "no_matching_assets")])
+@pytest.mark.parametrize("assets,reason", [((), "no_assets"), (((1, "a.rar", "uploaded"),), "no_matching_assets")])
 def test_P08_no_index_and_empty_release_do_not_invent_registry(assets, reason):
     plan = run([release(assets=assets)], index=None)
     assert not plan.index_present and plan.releases[0].assets == ()
@@ -193,9 +193,9 @@ def test_P11_path_budget_and_invalid_roots_for_new_and_recorded(root, code, reco
 
 
 def test_P12_skip_reason_precedence_and_prerelease_selection():
-    source = release(assets=((1, "a.exe", "new"), (2, "b.exe", "uploaded"), (3, "c.tar", "uploaded"), (4, "d.zip", "uploaded")))
+    source = release(assets=((1, "a.rar", "new"), (2, "b.rar", "uploaded"), (3, "c.tar", "uploaded"), (4, "d.zip", "uploaded")))
     plan = run([source], enabled_extensions=[".zip"])
-    assert plan.releases[0].skipped == (SkippedAsset(1, "a.exe", "unavailable"), SkippedAsset(2, "b.exe", "unsupported_format"), SkippedAsset(3, "c.tar", "format_disabled"))
+    assert plan.releases[0].skipped == (SkippedAsset(1, "a.rar", "unavailable"), SkippedAsset(2, "b.rar", "unsupported_format"), SkippedAsset(3, "c.tar", "format_disabled"))
     assert run([release(prerelease=True)]).releases == ()
     assert len(run([release(prerelease=True)], include_prereleases=True).releases) == 1
 
@@ -339,7 +339,7 @@ def test_R4_hostile_oracle(indexed, field, value):
         if mode == "zero": current = replace(current, assets=())
         if mode in ("unsupported", "unavailable"):
             a = current.assets[0]
-            a = replace(a, name=a.name.removesuffix(".zip") + ".exe", supported_extension=None) if mode == "unsupported" else replace(a, state="new")
+            a = replace(a, name=a.name.removesuffix(".zip") + ".rar", supported_extension=None) if mode == "unsupported" else replace(a, state="new")
             current = replace(current, assets=(a,))
         ignored = mode in ("draft", "prerelease", "unsupported", "unavailable")
         try: plan = run([current], index=index)

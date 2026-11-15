@@ -4,7 +4,9 @@ from collections.abc import Iterable
 from types import MappingProxyType
 
 
-SUPPORTED_EXTENSIONS = (".appimage", ".tar.gz", ".tar", ".dmg", ".zip", ".7z")
+DEFAULT_EXTENSIONS = (".appimage", ".tar.gz", ".tar", ".dmg", ".zip", ".7z")
+OPT_IN_EXTENSIONS = (".exe", ".msi")
+SUPPORTED_EXTENSIONS = DEFAULT_EXTENSIONS + OPT_IN_EXTENSIONS
 FORMAT_LABELS = MappingProxyType(
     {
         ".appimage": "AppImage",
@@ -13,6 +15,8 @@ FORMAT_LABELS = MappingProxyType(
         ".dmg": "DMG",
         ".zip": "ZIP",
         ".7z": "7z",
+        ".exe": "EXE",
+        ".msi": "MSI",
     }
 )
 

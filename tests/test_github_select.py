@@ -47,7 +47,7 @@ def test_draft_and_prerelease_filters(include, expected, excluded):
 
 
 def test_all_formats_and_longest_suffix_preserve_asset_order():
-    names = ["A.AppImage", "A.TAR.GZ", "A.TAR", "A.DMG", "A.ZIP", "A.7Z"]
+    names = ["A" + ext.upper() for ext in SUPPORTED_EXTENSIONS]
     parsed = release(assets=[(i + 1, name, "uploaded") for i, name in enumerate(names)])
     selected = select_releases([parsed]).releases[0]
     assert [match.extension for match in selected.matches] == list(SUPPORTED_EXTENSIONS)
@@ -56,7 +56,7 @@ def test_all_formats_and_longest_suffix_preserve_asset_order():
 
 
 @pytest.mark.parametrize("assets,reason", [
-    ([], "no_assets"), ([(1, "a.exe", "uploaded")], "no_matching_assets"),
+    ([], "no_assets"), ([(1, "a.rar", "uploaded")], "no_matching_assets"),
     ([(1, "a.zip", "new")], "no_matching_assets"),
     ([(1, "a.zip", "Uploaded")], "no_matching_assets"),
 ])
@@ -69,7 +69,7 @@ def test_empty_releases_are_kept(assets, reason):
 
 
 def test_duplicate_release_and_asset_ids_keep_first_and_preserve_metadata():
-    parsed = release(assets=[(1, "first.exe", "uploaded"), (1, "second.zip", "uploaded"),
+    parsed = release(assets=[(1, "first.rar", "uploaded"), (1, "second.zip", "uploaded"),
                              (2, "third.zip", "uploaded")])
     result = select_releases([parsed, release(1), release(2)])
     assert [item.release.id for item in result.releases] == [1, 2]
@@ -93,7 +93,7 @@ def test_catalog_and_one_shot_extensions_and_source():
 
 
 @pytest.mark.parametrize("enabled,error", [(".zip", TypeError), (b".zip", TypeError),
-    ([".exe"], ValueError), ([None], ValueError), ([".ZIP"], ValueError)])
+    ([".rar"], ValueError), ([None], ValueError), ([".ZIP"], ValueError)])
 @pytest.mark.parametrize("selector", [select_releases, select_release_by_tag])
 def test_enabled_extensions_validated_even_for_empty_source(enabled, error, selector):
     args = ([], "absent") if selector is select_release_by_tag else ([],)

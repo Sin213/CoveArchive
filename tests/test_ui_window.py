@@ -3,6 +3,7 @@
 import os
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from pathlib import Path
+from dataclasses import replace
 import subprocess
 import sys
 import time
@@ -16,6 +17,9 @@ from PySide6.QtWidgets import QApplication
 
 from covearchive import scan_worker as w
 from covearchive.ui.window import MainWindow
+from covearchive.ui.preferences import PreferenceStore
+from covearchive.ui.archive_bridge import ArchiveBridge, EnqueueResult, ShutdownStatus
+from covearchive.queue.models import JobState as S
 from test_scan_worker import RID, URL, ROOT, catalog, release, asset, DATE
 from test_scan_process import until, gone, command
 from covearchive.ui.scan_process import ScanController
@@ -42,12 +46,18 @@ class FakeController(QObject):
         self.job = None; self.terminal.emit(rid, state, result)
 
 
+@pytest.fixture(autouse=True)
+def isolated_data(tmp_path,monkeypatch): monkeypatch.setenv("LOCALAPPDATA",str(tmp_path))
+
+def isolated_window(launcher,controller):
+    return MainWindow(launcher,controller,bridge=ArchiveBridge(Path(os.environ["LOCALAPPDATA"])/"q.db"),preferences=PreferenceStore(Path(os.environ["LOCALAPPDATA"])/"prefs.json"))
+
 @pytest.fixture
 def ui():
-    controller = FakeController(); window = MainWindow(ROOT/"run_covearchive.py", controller)
+    controller = FakeController(); window = isolated_window(ROOT/"run_covearchive.py", controller)
     window.show(); APP.processEvents()
     yield window, controller
-    window.close(); APP.processEvents()
+    window.close(); until(lambda:window.bridge.closed); APP.processEvents()
 
 
 def succeed(window, controller, *items):
@@ -59,13 +69,15 @@ def test_UI_01_launcher_smoke():
     result = subprocess.run([sys.executable, "-I", "-B", str(ROOT/"run_covearchive.py"),
         "--smoke-test"], capture_output=True, timeout=10, env=os.environ.copy())
     assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert not (Path(os.environ["LOCALAPPDATA"])/"CoveArchive").exists()
 
 
 def test_UI_02_controls_defaults(ui):
     v, c = ui
     assert v.windowTitle() == "CoveArchive" and v.url.hasFocus()
     assert v.scan.isEnabled() and not v.cancel.isEnabled() and not v.prereleases.isChecked()
-    assert len(v.formats) == 6 and all(x.isChecked() for x in v.formats.values())
+    assert len(v.formats) == 8 and all(box.isChecked()==(ext not in (".exe",".msi")) for ext,box in v.formats.items())
+    assert all("never launched or installed" in v.formats[ext].toolTip() for ext in (".exe",".msi"))
     assert all(x.accessibleName() for x in [v.url,v.scan,v.cancel,v.prereleases,*v.formats.values(),v.tree])
     assert not v.windowFlags() & Qt.FramelessWindowHint
     assert v.status.text() == "Ready" and v.status.textFormat() == Qt.PlainText
@@ -105,7 +117,7 @@ def test_UI_09_10_empty_states(ui, items, text):
 
 def test_UI_11_12_13_local_filters(ui):
     v,c=ui
-    names=["a.appimage","a.tar.gz","a.tar","a.dmg","a.zip","a.7z","a.exe"]
+    names=["a.appimage","a.tar.gz","a.tar","a.dmg","a.zip","a.7z","a.exe","a.msi","a.rar"]
     succeed(v,c,release(assets=[asset(i+1,n) for i,n in enumerate(names)]),release(2,prerelease=True))
     original=v.catalog; calls=len(c.calls)
     for checkbox in v.formats.values(): checkbox.setChecked(False)
@@ -117,8 +129,8 @@ def test_UI_11_12_13_local_filters(ui):
     v.formats[".zip"].setChecked(True); v.prereleases.setChecked(True)
     assert "2 releases" in v.summary.text() and len(c.calls)==calls and v.catalog is original
     model=v.tree.model(); parent=model.index(0,0)
-    assert model.rowCount(parent)==7
-    assert model.data(model.index(6,5,parent))=="Unsupported format"
+    assert model.rowCount(parent)==9
+    assert model.data(model.index(8,5,parent))=="Unsupported format"
     assert model.data(model.index(0,5,parent))=="Filtered out"
 
 
@@ -160,11 +172,11 @@ def test_UI_22_28_plain_text_sanitized_stale(ui):
 
 def test_UI_24_real_close_kills():
     c=ScanController(ROOT/"run_covearchive.py",command_factory=command("import time;time.sleep(10)"))
-    v=MainWindow(ROOT/"run_covearchive.py",c); v.show(); v.url.setText(URL); v.scan.click()
+    v=isolated_window(ROOT/"run_covearchive.py",c); v.show(); v.url.setText(URL); v.scan.click()
     try:
         until(lambda:c.job.process.processId()>0); pid=c.job.process.processId()
-        v.close(); assert gone(pid) and c.job is None
-    finally: c.shutdown(1000); v.close()
+        v.close(); until(lambda:v.bridge.closed); assert gone(pid) and c.job is None
+    finally: c.shutdown(1000); v.close(); until(lambda:v.bridge.closed)
 
 
 @pytest.mark.parametrize("raw", [URL+"?q="+"\u00e9"*700,"   "+URL+" "*3000],ids=["query","padding"])
@@ -303,10 +315,134 @@ def test_R7_UI_06_real_process_success():
         "r=json.loads(sys.stdin.buffer.readline());"
         "sys.stdout.buffer.write(encode_success(r['request_id'],catalog(release())));sys.stdout.buffer.flush()")
     c=ScanController(ROOT/"run_covearchive.py",command_factory=command(script))
-    v=MainWindow(ROOT/"run_covearchive.py",c); v.show(); v.url.setText(URL); v.scan.click()
+    v=isolated_window(ROOT/"run_covearchive.py",c); v.show(); v.url.setText(URL); v.scan.click()
     try:
         until(lambda:v.scan.isEnabled())
         m=v.tree.model(); assert m.rowCount()==1
         assert m.data(m.index(0,0))=="Release 1"
         assert m.data(m.index(0,0,m.index(0,0)))=="app.zip"
-    finally: c.shutdown(1000); v.close()
+    finally: c.shutdown(1000); v.close(); until(lambda:v.bridge.closed)
+
+
+def test_C4_identity_rules_tristate_and_no_scan(ui):
+    v,c=ui; succeed(v,c,release(assets=[asset(1,"win.zip"),asset(2,"win-debug.zip"),asset(3,"darwin.zip")]))
+    m=v.tree.model(); root=m.index(0,0); assert m.setData(root,Qt.Checked,Qt.CheckStateRole)
+    assert v.checked=={(1,1),(1,2),(1,3)} and "(3)" in v.archive_selected.text()
+    v.catalog=replace(v.catalog,releases=(replace(v.catalog.releases[0],assets=tuple(reversed(v.catalog.releases[0].assets))),)); v._refresh()
+    assert v.checked=={(1,1),(1,2),(1,3)}
+    v.exclude.setText("*debug*"); v.include.setText("*win*, *windows*")
+    assert "Rules match 2 of 3" in v.preview.text() and "(2)" in v.archive_selected.text() and len(c.calls)==1
+    assert "1 checked" in v.held_back.text() and v.tree.model().data(v.tree.model().index(1,5,v.tree.model().index(0,0)))=="Excluded by filename rules"
+    m=v.tree.model(); m.setData(m.index(0,0,m.index(0,0)),Qt.Unchecked,Qt.CheckStateRole)
+    assert m.data(m.index(0,0),Qt.CheckStateRole)==Qt.PartiallyChecked
+    before=v.rules; v.include.setText("bad/path"); assert v.rules==before and v.rule_error.text()
+    v.formats[".zip"].setChecked(False); assert not v.archive_selected.isEnabled() and v.checked
+    v.formats[".zip"].setChecked(True); assert "(1)" in v.archive_selected.text()
+
+
+def test_C4_saved_rules_and_destination_are_repository_scoped(ui):
+    v,c=ui; succeed(v,c,release()); v.include.setText("*.zip"); v.save_rules.click()
+    assert "owner/repo" in v.preferences.load()[0]["repositories"]
+    v.url.setText(URL); v.scan.click(); c.finish(w.decode_response(w.encode_success(RID,catalog(release())),RID))
+    assert v.checked=={(1,1)}
+    v.root.setText("C:/Archive"); assert "Owner" in v.destination.text() and "release-" in v.destination.text()
+    v.root.setText("relative"); assert "absolute" in v.destination.text().lower()
+    v.url.setText("https://github.com/Other/Repo"); v.scan.click()
+    other=replace(catalog(release()),repository=type(catalog().repository)("Other","Repo"))
+    c.finish(w.decode_response(w.encode_success(RID,other),RID)); assert not v.checked and not v.include.text()
+
+
+def test_C4_corrupt_preferences_are_preserved(ui):
+    v,c=ui; succeed(v,c,release()); path=v.preferences.path; path.write_bytes(b"broken")
+    v.preferences=PreferenceStore(path); v.preferences.load(); v.save_rules.click()
+    assert path.read_bytes()==b"broken" and "read-only" in v.rule_error.text()
+
+
+class WindowBridge(QObject):
+    view_changed=Signal(object); enqueued=Signal(object); control_finished=Signal(object); run_event=Signal(object); shutdown_status=Signal(object)
+    is_open=True; run_active=False; shutting_down=False; closed=False
+    def __init__(self): super().__init__(); self.requests=[]; self.opens=0; self.stops=[]
+    def open(self): self.opens+=1
+    def enqueue(self,request): self.requests.append(request); return True
+    def control(self,*args): pass
+    def start_queue(self): pass
+    def begin_shutdown(self,pause_active=True): self.shutting_down=True; self.stops.append(pause_active)
+
+
+def test_C4b_enqueue_snapshot_duplicate_and_stale(tmp_path):
+    b=WindowBridge(); c=FakeController(); v=MainWindow(ROOT/"run_covearchive.py",c,bridge=b,preferences=PreferenceStore(tmp_path/"p.json"))
+    succeed(v,c,release(assets=[asset(1,"a.zip"),asset(2,"b.zip"),asset(3,"debug.zip")]))
+    v.checked.update(((1,1),(1,3))); v.exclude.setText("*debug*"); v._selection_changed(); v.root.setText("C:/Archive"); v._archive(); v._archive()
+    assert len(b.requests)==1 and b.opens==1; request=b.requests[0]
+    v.root.setText("C:/Later"); v.url.setText("other"); v.include.setText("nothing")
+    assert request.archive_root=="C:\\Archive" and tuple(i.asset.id for i in request.items)==(1,)
+    result=EnqueueResult(request.token,1,0,(("paused",S.PAUSED),),("job",),False,2,None)
+    b.enqueued.emit(replace(result,token=request.token-1)); APP.processEvents(); assert v.enqueue_pending
+    b.enqueued.emit(result); APP.processEvents(); assert not v.enqueue_pending and "2 earlier queued" in v.status.text() and "Resume/Retry" in v.status.text()
+    b.enqueued.emit(replace(result,startup_error="database_busy")); APP.processEvents()
+    assert "automatic start failed" in v.status.text() and "Press Start Queue" in v.status.text() and "Created 1" in v.status.text()
+    v.include.clear(); b.enqueue=lambda request:False; v.archive_selected.click()
+    assert not v.enqueue_pending and "Queue unavailable" in v.status.text()
+    b.closed=True; v.close()
+
+
+@pytest.mark.parametrize("active,choice",[(False,"Pause and Close"),(True,"Keep Open"),(True,"Pause and Close")])
+def test_C4b_close_waits_for_done(tmp_path,active,choice):
+    b=WindowBridge(); b.run_active=active; v=MainWindow(ROOT/"run_covearchive.py",FakeController(),bridge=b,preferences=PreferenceStore(tmp_path/"p.json")); v.show()
+    v._confirm_close=lambda:choice; v.close()
+    if active and choice=="Keep Open": assert v.isVisible() and not b.stops; b.closed=True; v.close(); return
+    assert v.isVisible() and b.stops==[True]; v.close(); assert b.stops==[True]
+    b.shutdown_status.emit(ShutdownStatus("timeout_waiting",("job",),True,False)); APP.processEvents()
+    assert "Still active" in v.status.text() and "not persisted" in v.status.text()
+    b.closed=True; b.shutdown_status.emit(ShutdownStatus("done",(),False,False)); APP.processEvents()
+    assert not v.isVisible() and v.preferences.load()[0]["window"]["tab"]=="browse"
+    previous=v.status.text(); v.controller.state_changed.emit(RID,"RUNNING"); APP.processEvents(); assert v.status.text()==previous
+
+
+def test_R3b_destination_empty_bands_and_finishing(ui):
+    v,c=ui; v.resize(820,520); APP.processEvents()
+    assert all(label.isHidden() for label in (v.rule_error,v.preview,v.held_back,v.detail))
+    succeed(v,c,release(1,assets=[asset(i,f"app{i}.zip") for i in range(1,7)]),release(2,assets=[asset(20,"second.zip")]))
+    v.checked.add((2,20)); v.root.setText("C:/Archive"); v._selection_changed(); v.tree.expandAll(); APP.processEvents()
+    from covearchive.archive.naming import release_folder_name
+    assert release_folder_name(v.catalog.releases[1].tag_name,2) in v.destination.text() and "if present" in v.destination.text()
+    assert v.tree.visualRect(v.tree.model().index(4,0,v.tree.model().index(0,0))).bottom()<=v.tree.viewport().height()
+    v.checked.add((1,1)); v._selection_changed(); assert "2 release folders under" in v.destination.text()
+    v.checked.clear(); v._selection_changed(); assert "<release folder>" in v.destination.text()
+    v._shutdown_status(ShutdownStatus("timeout_waiting",(),True)); assert "Finishing up" in v.status.text() and "Still active: 0" not in v.status.text()
+
+
+@pytest.mark.parametrize("state", ["FAILED", "CANCELLED", "TIMED_OUT"])
+def test_F3_rule_save_requires_displayed_catalog(ui,state):
+    v,c = ui
+    succeed(v,c,release())
+    v.save_rules.click()
+    original = v.preferences.path.read_bytes()
+    v.url.setText("https://github.com/Other/Repo")
+    v.scan.click()
+    v._save_rules()
+    assert v.catalog is None and not v.save_rules.isEnabled() and not v.preview.text()
+    assert v.preferences.path.read_bytes()==original
+    c.finish(w.ScanFailure(RID,"network"),state)
+    v._save_rules()
+    assert v.catalog is None and v.preferences.path.read_bytes()==original
+    succeed(v,c,release())
+    v.save_rules.click()
+    assert set(v.preferences.load()[0]["repositories"])=={"owner/repo"}
+
+
+def test_F4_invalid_edit_cannot_save_previous_valid_rules(ui):
+    from covearchive.build_filters import BuildRules, BuildFilterError, parse_patterns
+    v,c = ui
+    succeed(v,c,release())
+    v.save_rules.click()
+    original = v.preferences.path.read_bytes()
+    v.include.setText("bad/path")
+    with pytest.raises(BuildFilterError) as error:
+        BuildRules(parse_patterns(v.include.text()),())
+    v.save_rules.click()
+    assert v.rule_error.text()==str(error.value) and v.preferences.path.read_bytes()==original
+    v.include.setText("*.zip")
+    v.save_rules.click()
+    assert v.rule_error.text()=="Rules saved"
+    assert v.preferences.load()[0]["repositories"]["owner/repo"]["include"]==["*.zip"]
