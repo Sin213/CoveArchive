@@ -6,11 +6,13 @@ from dataclasses import FrozenInstanceError, replace
 from itertools import permutations
 import os
 from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 import socket
 import subprocess
 import sys
 
 import pytest
+from platform_paths import NativePath, native_root
 
 from covearchive.archive.manifest import AssetRecord, ProjectIndex, ReleaseRecord
 from covearchive.archive import manifest as m
@@ -21,9 +23,16 @@ from covearchive.github.select import ExcludedRelease
 from covearchive.github.urls import RepositoryTarget
 
 
-ROOT = PureWindowsPath(r"Q:\ca-s4-nonexistent-archive")
+ROOT = NativePath(native_root("Q:/ca-s4-nonexistent-archive"))
 REPO = RepositoryTarget("Owner", "Repo")
 HASH = "a" * 64
+
+
+@pytest.fixture
+def windows_paths(monkeypatch):
+    from covearchive.archive import naming, plan
+    monkeypatch.setattr(naming, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(plan, "sys", SimpleNamespace(platform="win32"))
 
 
 def release(i=1, *, assets=((1, "a.zip", "uploaded"),), **changes):
@@ -62,10 +71,10 @@ def test_P01_new_project_paths_and_publisher_metadata():
     source = replace(source, assets=(replace(source.assets[0], sha256=HASH),))
     plan = run([source])
     item = plan.releases[0].assets[0]
-    assert plan.repository == REPO and plan.project_dir == PureWindowsPath("Owner/Repo")
+    assert plan.repository == REPO and plan.project_dir == NativePath("Owner/Repo")
     assert not plan.index_present and item.state == "new" and item.action == "download"
     assert item.record == AssetRecord(1, "a.zip", "a.zip", 0, HASH, None, "planned")
-    assert item.extension == ".zip" and item.path == PureWindowsPath("Owner/Repo/release-v1--1/a.zip")
+    assert item.extension == ".zip" and item.path == NativePath("Owner/Repo/release-v1--1/a.zip")
     assert plan.index.releases == (ReleaseRecord(1, "v1", "release-v1--1", (item.record,)),)
 
 
@@ -146,7 +155,7 @@ def test_P09_shuffled_releases_assets_and_root_independent_folders():
     for asset_order in permutations(assets):
         for source in permutations((release(assets=asset_order), release(2, assets=((3, "c.zip", "uploaded"),)))):
             assert run(source) == expected
-    assert run([release()], archive_root=PureWindowsPath(r"R:\elsewhere")).releases == run([release()]).releases
+    assert run([release()], archive_root=NativePath(native_root("R:/elsewhere"))).releases == run([release()]).releases
 
 
 @pytest.mark.parametrize("case,code", [("incomplete", "incomplete_catalog"), ("missing_repo", "repository"),
@@ -181,14 +190,14 @@ def test_P10_complete_catalog_iterable_and_exact_duplicates_are_tolerated():
 
 def test_P10_index_spelling_is_the_established_project_identity():
     plan = run([release()], repository=RepositoryTarget("owner", "repo"), index=known())
-    assert plan.repository == REPO and plan.project_dir == PureWindowsPath("Owner/Repo")
+    assert plan.repository == REPO and plan.project_dir == NativePath("Owner/Repo")
     assert plan.releases[0].assets[0].path.parts[:2] == ("Owner", "Repo")
 
 
 @pytest.mark.parametrize("root,code", [(PureWindowsPath("Q:\\" + "x" * 200), "budget"),
     (PureWindowsPath("relative"), "root"), (PureWindowsPath(r"Q:\a\..\b"), "root"), (PureWindowsPath(r"\\?\Q:\a"), "root")])
 @pytest.mark.parametrize("recorded", [False, True])
-def test_P11_path_budget_and_invalid_roots_for_new_and_recorded(root, code, recorded):
+def test_P11_path_budget_and_invalid_roots_for_new_and_recorded(root, code, recorded, windows_paths):
     rejected(lambda: run([release()], archive_root=root, index=known() if recorded else None), code, PathBudgetError)
 
 
@@ -276,7 +285,7 @@ def test_R17_planned_metadata(changes, action):
 
 
 @pytest.mark.parametrize("status", ["planned", "completed"])
-def test_R21_recorded_name_under_deeper_root(status):
+def test_R21_recorded_name_under_deeper_root(status, windows_paths):
     index = known(status, saved_name="x" * 100 + ".zip")
     root = "Q:\\" + "x" * 107
     item = run([release()], archive_root=root, index=index).releases[0].assets[0]

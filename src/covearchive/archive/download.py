@@ -9,13 +9,14 @@ This module has no queue/GUI/resume/background work or private-repository auth; 
 """
 from dataclasses import dataclass, replace
 from enum import Enum
-from pathlib import PureWindowsPath
+from pathlib import PurePath
 import time
 
 from covearchive.github.models import Release, ReleaseAsset
 from covearchive.github.urls import RepositoryTarget, parse_github_url
 from covearchive.transfer.resolve import DownloadError, open_asset_stream
-from . import manifest as m, naming, plan, store, winfs
+from . import manifest as m, naming, plan, store
+from .store import winfs
 
 
 class ArchiveStatus(str, Enum):
@@ -159,7 +160,7 @@ def archive_asset(repository, release, asset, archive_root, *, policy=None, sess
     final flush/rename or later commit are treated as after publication.
     """
     if (not isinstance(repository,RepositoryTarget) or not isinstance(release,Release)
-            or not isinstance(asset,ReleaseAsset) or not isinstance(archive_root,(str,PureWindowsPath))):
+            or not isinstance(asset,ReleaseAsset) or not isinstance(archive_root,(str,PurePath))):
         raise TypeError("Expected repository, release, asset and archive root.")
     result = ArchiveResult(ArchiveStatus.FAILED,None,asset.id,release.id)
     committing = False

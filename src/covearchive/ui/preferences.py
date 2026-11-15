@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 
 from PySide6.QtCore import QIODevice, QSaveFile
 from covearchive.archive.naming import validate_root
@@ -81,6 +82,10 @@ class PreferenceStore:
     def __init__(self, path=None):
         local = os.environ.get("LOCALAPPDATA")
         self.path = Path(path) if path is not None else (Path(local)/"CoveArchive"/"preferences.json" if local else None)
+        if path is None and sys.platform != "win32":
+            config = os.environ.get("XDG_CONFIG_HOME", "")
+            base = Path(config) if os.path.isabs(config) else Path.home()/".config"
+            self.path = base/"covearchive"/"preferences.json"
         self.writable = self.path is not None
         self.problem = None if self.writable else "LOCALAPPDATA is unset; preferences are in-memory only."
         self._loaded = False
@@ -125,7 +130,13 @@ class PreferenceStore:
             return "Invalid preferences; check filename rules, formats and archive root."
         output = None
         try:
-            os.makedirs(self.path.parent, exist_ok=True)
+            if sys.platform == "win32":
+                os.makedirs(self.path.parent, exist_ok=True)
+            else:
+                missing, directory = [], self.path.parent
+                while not directory.exists():
+                    missing.append(directory); directory = directory.parent
+                for directory in reversed(missing): directory.mkdir(mode=0o700, exist_ok=True)
             output = QSaveFile(str(self.path))
             output.setDirectWriteFallback(False)
             if not output.open(QIODevice.WriteOnly): return "Could not open preferences for atomic saving."

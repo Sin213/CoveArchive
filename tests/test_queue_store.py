@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 import pytest
+from platform_paths import native_root
 from covearchive.queue import models as m, store as q
 from covearchive.github.models import Release, ReleaseAsset
 from covearchive.github.urls import RepositoryTarget
@@ -17,7 +18,7 @@ EDGES={'QUEUED':{'RUNNING','PAUSED','CANCELLED'},'RETRY_WAIT':{'RUNNING','PAUSED
     'RUNNING':{'COMPLETED','RETRY_WAIT','FAILED','PAUSED','CANCELLED','QUEUED'},
     'PAUSED':{'QUEUED','CANCELLED'},'COMPLETED':{'QUEUED'},'FAILED':{'QUEUED'},'CANCELLED':{'QUEUED'}}
 
-def item(i=1,root='C:/Archive',**changes):
+def item(i=1,root=native_root('C:/Archive'),**changes):
     a=ReleaseAsset(i,'app.zip',42,'uploaded','application/zip','https://secret?sig=token',None,None,None,'','','.zip')
     a=replace(a,**changes)
     r=Release(10,'v1',None,False,False,None,'',None,None,(a,),None,None)
@@ -76,7 +77,8 @@ def test_Q03_Q04_Q06_fifo_atomicity(db):
 
 def test_Q04_root_and_terminal_dedupe(db):
     e=db.enqueue(*item())
-    assert db.enqueue(*item(root='c:\\ARCHIVE\\')).job.job_id==e.job.job_id
+    equivalent='c:\\ARCHIVE\\' if sys.platform == 'win32' else native_root('C:/Archive')
+    assert db.enqueue(*item(root=equivalent)).job.job_id==e.job.job_id
     j=db.claim_next('a')
     result=NS(status='ARCHIVED',integrity='LOCAL_HASH_ONLY',transferred=True)
     db.finish(j.job_id,'a',S.COMPLETED,result=result,retry_count=3)
@@ -144,7 +146,7 @@ def test_Q25_untouched(tmp_path,kind):
 
 def test_Q26_thread_claims(tmp_path):
     path=tmp_path/'q.db'; db=q.QueueStore(path)
-    db.enqueue_many([item(i,root=f'C:/Archive/{i}') for i in range(1,25)])
+    db.enqueue_many([item(i,root=native_root(f'C:/Archive/{i}')) for i in range(1,25)])
     stores=[q.QueueStore(path) for _ in range(4)]; barrier=threading.Barrier(4)
     def claim(n):
         barrier.wait(timeout=5); found=[]
@@ -198,6 +200,13 @@ def test_Q01_busy_error(tmp_path):
         with pytest.raises(m.QueueBusyError): db.enqueue(*item())
 
 def test_Q01_default_path(monkeypatch,tmp_path):
+    if sys.platform != 'win32':
+        monkeypatch.setenv('XDG_STATE_HOME',str(tmp_path))
+        assert q.default_queue_path()==tmp_path/'covearchive'/'queue.sqlite3'
+        monkeypatch.delenv('XDG_STATE_HOME')
+        monkeypatch.setenv('HOME',str(tmp_path))
+        assert q.default_queue_path()==tmp_path/'.local'/'state'/'covearchive'/'queue.sqlite3'
+        return
     monkeypatch.setenv('LOCALAPPDATA',str(tmp_path))
     assert q.default_queue_path()==tmp_path/'CoveArchive'/'queue.sqlite3'
     monkeypatch.delenv('LOCALAPPDATA')
@@ -307,7 +316,7 @@ def test_Q25_TN08_live_application_id(db):
     assert db.path.read_bytes()==before
 
 def test_Q19_S2_cooldown_max_and_gate(db):
-    db.enqueue_many([item(i,root=f'C:/A/{i}') for i in (1,2,3)]); a=db.claim_next('a'); b=db.claim_next('b')
+    db.enqueue_many([item(i,root=native_root(f'C:/A/{i}')) for i in (1,2,3)]); a=db.claim_next('a'); b=db.claim_next('b')
     for j,owner,until in ((a,'a',400),(b,'b',160)): db.finish(j.job_id,owner,S.FAILED,cooldown_until=until)
     assert db.cooldown_until()==400
     other=q.QueueStore(db.path); assert other.claim_next('c',now=399) is None
@@ -328,11 +337,13 @@ def test_Q25_S1_ordered_schema(db,damage):
 
 _ROOT_ALIASES=[('D:/','D:\\','D:/.','d:\\.\\'),('D:/Archive','d:\\ARCHIVE\\','D:/Archive/./','D:\\\\Archive')]
 @pytest.mark.parametrize('roots',_ROOT_ALIASES)
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows drive, case and separator aliases are not native Linux roots')
 def test_Q04_H1_root_aliases(db,roots):
     jobs=[db.enqueue(*item(root=root)).job for root in roots]
     assert len({j.job_id for j in jobs})==len({j.project_key for j in jobs})==1
 
 @pytest.mark.parametrize('roots',_ROOT_ALIASES)
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows drive, case and separator aliases are not native Linux roots')
 def test_Q10_H1_alias_project_claim(db,roots):
     db.enqueue(*item(1,root=roots[0])); db.enqueue(*item(2,root=roots[-1]))
     assert db.claim_next('first') is not None and db.claim_next('second') is None

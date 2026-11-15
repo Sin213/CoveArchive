@@ -30,8 +30,33 @@ Errors retain the URL so you can rescan without restart.
 Unauthenticated GitHub API rate limits apply; retry guidance uses backend fields.
 The GUI never makes synchronous network requests. A worker watchdog also exits on
 parent-pipe EOF or its own deadline, guarding against Windows Python redirectors
-that might otherwise leave a grandchild behind. This is a Windows-first source
-launcher; frozen packaging and other operating systems are not validated here.
+that might otherwise leave a grandchild behind. Frozen packaging is not validated here.
+
+## Linux source launch
+
+On Arch Linux, run `python run_covearchive.py` with the dependencies above in a
+native Wayland or X11 session. Choose an existing absolute native archive root
+(for example `/home/user/Archives`), then scan, select assets, enqueue them and
+explicitly start the queue. Reopening the app recovers queue state without
+starting downloads automatically.
+
+Preferences use `$XDG_CONFIG_HOME/covearchive` (default `~/.config/covearchive`);
+the queue uses `$XDG_STATE_HOME/covearchive` (default `~/.local/state/covearchive`).
+Relative XDG values are ignored. New archive files have mode 0600;
+new archive and application directories have mode 0700.
+The Linux backend uses pinned directory descriptors, no-follow opens, `flock`
+ownership and fd-bound no-replace binary publication through
+`linkat(AT_SYMLINK_FOLLOW)` and `/proc/self/fd`. A hardlink-capable local filesystem
+and accessible proc fd links are required; unsupported publication fails closed.
+A crash between linking the final name and removing the reserved temp alias
+is recovered on the next run. File contents are fsynced before publication;
+directory fsync is best effort, with no power-loss durability promise.
+Linux has no handle-based unlink: a same-uid replacement after the final identity
+check may be unlinked by temp cleanup. Metadata rename/replace retains same-uid pathname
+races. Such writers can modify closed files; publication does not make files immutable.
+The separate aria2 engine remains Windows-only; selected-asset archiving uses
+the shared streaming resolver. `python run_covearchive.py --smoke-test` uses
+temporary XDG state and opens and closes the GUI.
 
 ## GitHub URL classification
 

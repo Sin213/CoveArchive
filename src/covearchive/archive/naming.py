@@ -8,8 +8,10 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
-from pathlib import PureWindowsPath
+from pathlib import PurePath, PureWindowsPath, PurePosixPath
+import os
 import re
+import sys
 import unicodedata
 
 
@@ -75,6 +77,21 @@ def _suffix(name, suffix, limit):
     if not stem:
         raise NamingError("budget")
     return stem + suffix + ext
+
+
+def _asset_suffix(name, suffix, limit):
+    if sys.platform == "win32":
+        return _suffix(name, suffix, limit)
+    stem, ext = _extension(name)
+    budget = limit - len(os.fsencode(suffix + ext))
+    used, end = 0, 0
+    for char in stem:
+        used += len(os.fsencode(char))
+        if used > budget: break
+        end += 1
+    if not end:
+        raise NamingError("budget")
+    return stem[:end] + suffix + ext
 
 
 def sanitize_component(name: str, *, limit=MAX_COMPONENT_LENGTH) -> str:
@@ -154,6 +171,9 @@ def allocate_asset_names(assets: Mapping[int, str], *,
                          taken: Mapping[int, str] | None = None,
                          limit=MAX_COMPONENT_LENGTH) -> dict[int, AssetName]:
     bases = {i: sanitize_component(assets[i], limit=limit) for i in sorted(assets)}
+    if sys.platform != "win32":
+        bases = {i: (_asset_suffix(base, "--" + _hash(assets[i]), limit)
+                     if len(os.fsencode(base)) > limit else base) for i, base in bases.items()}
     groups = Counter(name_key(base) for base in bases.values())
     claimed = {name_key(name) for name in (taken or {}).values()} | {name_key(RELEASE_FILENAME)}
     result = {}
@@ -167,19 +187,33 @@ def allocate_asset_names(assets: Mapping[int, str], *,
         if i in result:
             continue
         suffix, attempt = "--" + str(i), 1
-        candidate = _suffix(base, suffix, limit)
+        candidate = _asset_suffix(base, suffix, limit)
         while name_key(candidate) in claimed:
             attempt += 1
-            candidate = _suffix(base, suffix + "-" + str(attempt), limit)
+            candidate = _asset_suffix(base, suffix + "-" + str(attempt), limit)
         result[i] = AssetName(i, assets[i], candidate, True)
         claimed.add(name_key(candidate))
     return {i: result[i] for i in sorted(result)}
 
 
-def validate_root(root: str | PureWindowsPath) -> int:
-    if not isinstance(root, (str, PureWindowsPath)):
+def validate_root(root: str | PurePath) -> int:
+    if not isinstance(root, (str, PureWindowsPath if sys.platform == "win32" else PurePosixPath)):
         raise PathBudgetError("root")
     text = str(root)
+    if sys.platform != "win32":
+        path = PurePosixPath(text)
+        if (not text.startswith("/") or text.startswith("//") or "\0" in text
+                or "\\" in text or str(path) != text or ".." in path.parts):
+            raise PathBudgetError("root")
+        try:
+            text.encode("utf-8", "strict")
+            lengths = [len(os.fsencode(p)) for p in path.parts[1:]]
+            length = len(os.fsencode(text))
+        except UnicodeError as exc:
+            raise PathBudgetError("root") from exc
+        if any(n > 255 for n in lengths) or length >= 4096:
+            raise PathBudgetError("budget")
+        return length
     windows = text.replace("/", "\\")
     path = PureWindowsPath(windows)
     if (not path.is_absolute() or windows.startswith(("\\\\?\\", "\\\\.\\"))
@@ -192,8 +226,14 @@ def validate_root(root: str | PureWindowsPath) -> int:
     return _units(text.rstrip("\\"))
 
 
-def filename_limit(root: str | PureWindowsPath, owner_dir: str, repo_dir: str,
+def filename_limit(root: str | PurePath, owner_dir: str, repo_dir: str,
                    folder: str) -> int:
+    if sys.platform != "win32":
+        prefix = validate_root(root) + sum(len(os.fsencode(c)) for c in (owner_dir, repo_dir, folder)) + 4
+        limit = min(MAX_COMPONENT_LENGTH, 255, 4095 - prefix)
+        if limit < MIN_FILENAME_LENGTH:
+            raise PathBudgetError("budget")
+        return limit
     prefix = validate_root(root) + sum(_units(c) for c in (owner_dir, repo_dir, folder)) + 4
     limit = min(MAX_COMPONENT_LENGTH, MAX_PATH_BUDGET - prefix)
     if limit < MIN_FILENAME_LENGTH:
@@ -201,9 +241,14 @@ def filename_limit(root: str | PureWindowsPath, owner_dir: str, repo_dir: str,
     return limit
 
 
-def check_path_budget(root: str | PureWindowsPath, owner_dir: str, repo_dir: str,
+def check_path_budget(root: str | PurePath, owner_dir: str, repo_dir: str,
                       folder: str, filename: str) -> None:
     root_length = validate_root(root)
+    if sys.platform != "win32":
+        lengths = [len(os.fsencode(c)) for c in (owner_dir, repo_dir, folder, filename)]
+        if max(lengths) > 255 or root_length + sum(lengths) + 4 >= 4096:
+            raise PathBudgetError("budget")
+        return
     lengths = [_units(c) for c in (owner_dir, repo_dir, folder, filename)]
     if max(lengths) > MAX_COMPONENT_LENGTH or root_length + sum(lengths) + 4 > MAX_PATH_BUDGET:
         raise PathBudgetError("budget")

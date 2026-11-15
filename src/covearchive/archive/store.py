@@ -1,4 +1,4 @@
-"""Handle-anchored asset persistence on an explicitly authorized NTFS root.
+"""Handle-anchored asset persistence on an explicitly authorized local root.
 
 Asset publication never replaces an existing destination; temporary creation is
 exclusive. Verification describes the bytes observed through one pinned read
@@ -18,13 +18,20 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 import hashlib
 import re
+import sys
 import time
 
 from covearchive.github.urls import RepositoryTarget
-from . import manifest as m, naming, winfs
+from . import manifest as m, naming
+if sys.platform == "win32":
+    from . import winfs
+else:
+    from . import posixfs as winfs
 from .manifest import AssetRecord, MAX_SIZE
-from .winfs import (ArchiveError, ArchiveConflictError, ArchiveUnsafePathError,
-                    ArchiveRoot, Directory)
+ArchiveError = winfs.ArchiveError
+ArchiveConflictError = winfs.ArchiveConflictError
+ArchiveUnsafePathError = winfs.ArchiveUnsafePathError
+ArchiveRoot, Directory = winfs.ArchiveRoot, winfs.Directory
 
 _PROOF = object()
 

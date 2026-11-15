@@ -5,8 +5,10 @@ import os
 import hashlib
 import json
 import socket
+import sys
 import pytest
-from covearchive.archive import download as d, manifest as m, naming, plan, store, winfs
+from covearchive.archive import download as d, manifest as m, naming, plan, store
+from covearchive.archive.store import winfs
 from covearchive.github.models import Release
 from covearchive.github.urls import RepositoryTarget
 from covearchive.transfer.resolve import TransferPolicy
@@ -277,6 +279,7 @@ def test_directory_destination_fails_without_replacement(rig):
     assert path.is_dir() and not list(path.iterdir()); no_temps(root)
     assert not (project(root)/"archive-index.json").exists()
 
+@pytest.mark.skipif(sys.platform != "win32", reason="requires NTFS share-mode exclusion; Linux has no mandatory per-open exclusion")
 def test_exclusive_destination_is_retryable_and_untouched(rig):
     root,server=rig; run(rig); server.requests.clear()
     with winfs.ArchiveRoot.open(str(root)) as authorized:

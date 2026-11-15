@@ -6,6 +6,7 @@ import inspect
 import threading
 import time
 import pytest
+from platform_paths import native_root
 from PySide6.QtCore import QCoreApplication, QObject, Signal, Slot, Qt, QTimer, QEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -46,7 +47,10 @@ class Sink(QObject):
 
 
 @pytest.fixture(autouse=True)
-def isolated(monkeypatch, tmp_path): monkeypatch.setenv("LOCALAPPDATA",str(tmp_path/"appdata"))
+def isolated(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA",str(tmp_path/"appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME",str(tmp_path/"config"))
+    monkeypatch.setenv("XDG_STATE_HOME",str(tmp_path/"state"))
 
 
 @pytest.fixture
@@ -73,7 +77,7 @@ def rig(tmp_path):
     app.processEvents()
 
 
-def request(token=1, root="C:/Archive"):
+def request(token=1, root=native_root("C:/Archive")):
     repo,r,a,_=item()
     return EnqueueRequest(token,repo,root,(EnqueueItem(r,a),))
 
@@ -93,7 +97,7 @@ def test_snapshots_enqueue_identity_root_and_no_start(rig):
     assert result.created==1 and not result.started and result.error is None
     second=submit(bridge,sink,request(2)); assert second.created==0 and len(second.existing)==1
     job=bridge._store.list_jobs()[0]
-    assert (job.release_id,job.asset_id,job.archive_root,job.repo_key)==(10,1,"C:/Archive","owner/repo")
+    assert (job.release_id,job.asset_id,job.archive_root,job.repo_key)==(10,1,native_root("C:/Archive"),"owner/repo")
     until(lambda:sink.views[-1].jobs)
     view=sink.views[-1]; assert view.jobs[0].state==S.QUEUED and not view.jobs[0].owned
     assert "https://" not in repr(view) and "sig=" not in repr(result)
@@ -271,10 +275,10 @@ def test_run_loop_single_no_lost_enqueue_at_final_check_and_affinity(rig,monkeyp
             return result
         finally: active[0]-=1
     monkeypatch.setattr(bridge._runner,"run_pending",run)
-    bridge._store.enqueue(repo,r,a,"C:/Archive"); bridge.start_queue()
+    bridge._store.enqueue(repo,r,a,native_root("C:/Archive")); bridge.start_queue()
     try:
         until(gate.is_set); assert bridge.run_active
-        result=submit(bridge,sink,request(50,"C:/Other")); assert result.started
+        result=submit(bridge,sink,request(50,native_root("C:/Other"))); assert result.started
         for _ in range(5): bridge.start_queue()
     finally: release.set()
     until(lambda:not bridge.run_active and len(calls)>=2)
@@ -285,7 +289,7 @@ def test_run_loop_single_no_lost_enqueue_at_final_check_and_affinity(rig,monkeyp
 
 def test_start_rules_defer_restored_jobs_and_resume_batch(rig):
     repo,r,a,_=item(); bridge,sink=rig(run=True,catalog=lambda repo:NS(releases=(r,)),archive=lambda *a,**k:ArchiveResult(ArchiveStatus.ARCHIVED,None,1,10))
-    earlier=bridge._store.enqueue(repo,r,a,"C:/Earlier").job
+    earlier=bridge._store.enqueue(repo,r,a,native_root("C:/Earlier")).job
     result=submit(bridge,sink); assert not result.started and result.deferred_pending==1
     job_id=result.job_ids[0]
     bridge.control(3,"pause",(job_id,)); until(lambda:sink.controls)
@@ -296,7 +300,7 @@ def test_start_rules_defer_restored_jobs_and_resume_batch(rig):
 
 
 def test_other_runner_lock_and_run_exception_leave_commands_usable(rig,monkeypatch):
-    bridge,sink=rig(run=True); repo,r,a,_=item(); job=bridge._store.enqueue(repo,r,a,"C:/Archive").job
+    bridge,sink=rig(run=True); repo,r,a,_=item(); job=bridge._store.enqueue(repo,r,a,native_root("C:/Archive")).job
     with RunnerLock(bridge._store.path):
         bridge.start_queue(); until(lambda:sink.runs and sink.runs[-1].kind=="blocked")
         assert sink.runs[-1].kind=="blocked" and bridge.is_open
@@ -315,7 +319,7 @@ def test_timer_refresh_and_cooldown_not_bypassed(rig):
     repo,r,a,_=item(); calls=[]
     def archive(*args,**kw): calls.append(time.time()); return ArchiveResult(ArchiveStatus.ARCHIVED,None,1,10)
     bridge,sink=rig(run=True,catalog=lambda repo:NS(releases=(r,)),archive=archive)
-    job=bridge._store.enqueue(repo,r,a,"C:/Archive").job
+    job=bridge._store.enqueue(repo,r,a,native_root("C:/Archive")).job
     bridge._store.claim_next("test"); until_at=time.time()+0.4
     bridge._store.finish(job.job_id,"test",S.RETRY_WAIT,retry_count=2,next_attempt_at=until_at,cooldown_until=until_at)
     bridge.start_queue(); QTest.qWait(70)
@@ -359,7 +363,7 @@ def done(bridge,sink): until(lambda:bridge.closed and sink.shutdowns and sink.sh
 
 def test_shutdown_persists_pause_before_signal_and_keeps_queued(blocked_shutdown,monkeypatch):
     bridge,sink,job,release,mode=blocked_shutdown; observed=[]; original=bridge._runner._request_stop
-    repo,r,a,_=item(); queued=bridge._store.enqueue(repo,r,a,"C:/Waiting").job
+    repo,r,a,_=item(); queued=bridge._store.enqueue(repo,r,a,native_root("C:/Waiting")).job
     def stop(control,reason):
         if reason=="shutdown": assert observed==["pause"]
         if reason=="pause":
@@ -432,7 +436,7 @@ def test_shutdown_never_opened_or_corrupt_preserves_file(tmp_path,rig):
 
 def test_shutdown_while_waiting_for_retries_is_prompt(rig):
     bridge,sink=rig(run=True); bridge.observation_timeout=0.02; repo,r,a,_=item()
-    job=bridge._store.enqueue(repo,r,a,"C:/Archive").job; bridge._store.claim_next("test")
+    job=bridge._store.enqueue(repo,r,a,native_root("C:/Archive")).job; bridge._store.claim_next("test")
     bridge._store.finish(job.job_id,"test",S.RETRY_WAIT,next_attempt_at=time.time()+60)
     bridge.start_queue(); until(lambda:bridge.run_active)
     start=time.monotonic(); bridge.begin_shutdown(); done(bridge,sink)
@@ -524,7 +528,7 @@ def test_R3_shutdown_waits_for_inflight_open(tmp_path,monkeypatch):
 
 
 def test_R3_pause_stops_scheduler_before_command_returns(blocked_shutdown,monkeypatch):
-    bridge,sink,job,release,mode=blocked_shutdown; queued=bridge._store.enqueue(*item()[:3],"C:/Waiting").job; claims=[]; downloads=[]
+    bridge,sink,job,release,mode=blocked_shutdown; queued=bridge._store.enqueue(*item()[:3],native_root("C:/Waiting")).job; claims=[]; downloads=[]
     original=bridge._store.claim_next; pause=bridge._pause_all; change=bridge._runner.pause
     def claim(*a,**k): claims.append(1); return original(*a,**k)
     def paused(identifier): result=change(identifier); release.set(); time.sleep(0.1); return result
@@ -556,7 +560,7 @@ def test_R3_worker_finish_waits_for_atomic_stop_then_resumes(blocked_shutdown,mo
 def test_F1_interrupted_rows_require_explicit_start(rig,tmp_path,held,interrupted):
     from covearchive.ui.queue_panel import QueuePanel
     store = QueueStore(tmp_path/"q.db")
-    old = store.enqueue(*item()[:3],"C:/Archive").job
+    old = store.enqueue(*item()[:3],native_root("C:/Archive")).job
     if interrupted: store.claim_next("crashed-owner")
     calls = []
     def archive(*args,**kwargs):
@@ -570,7 +574,7 @@ def test_F1_interrupted_rows_require_explicit_start(rig,tmp_path,held,interrupte
         until(lambda:panel.table.rowCount()==1)
         panel.table.selectRow(0)
         assert not calls and not bridge.run_active and panel.start.isEnabled()
-        result = submit(bridge,sink,request(77,"C:/New"))
+        result = submit(bridge,sink,request(77,native_root("C:/New")))
         assert not result.started and result.deferred_pending==1
         panel.start.click()
         if held:
@@ -604,7 +608,7 @@ def test_F2_failed_runner_retires_before_replacement(blocked_shutdown,monkeypatc
         assert gate.wait(3)
         return shutdown(timeout)
     if stop: monkeypatch.setattr(old,"shutdown",gated_shutdown)
-    if not stop: bridge._store.enqueue(*item()[:3],"C:/Waiting")
+    if not stop: bridge._store.enqueue(*item()[:3],native_root("C:/Waiting"))
     target = "claim_next" if blocked else "finish"
     original = getattr(bridge._store,target)
     def fail_once(*args,**kwargs):

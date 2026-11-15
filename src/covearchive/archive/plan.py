@@ -12,7 +12,8 @@ If plan_archive returns plan P: (1) every selected release's remote id/tag and e
 """
 
 from dataclasses import dataclass, replace
-from pathlib import PureWindowsPath
+from pathlib import PurePath, PureWindowsPath, PurePosixPath
+import sys
 
 from covearchive.github.models import Release, ReleaseAsset, ReleaseCatalog
 from covearchive.github.select import ExcludedRelease, select_releases
@@ -38,7 +39,7 @@ class AssetPlan:
     state: str
     action: str
     notes: tuple[str, ...]
-    path: PureWindowsPath
+    path: PurePath
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ class RetainedEntry:
 @dataclass(frozen=True)
 class ArchivePlan:
     repository: RepositoryTarget
-    project_dir: PureWindowsPath
+    project_dir: PurePath
     index_present: bool
     releases: tuple[ReleasePlan, ...]
     retained: tuple[RetainedEntry, ...]
@@ -174,7 +175,7 @@ def _plan_archive(source, *, archive_root, repository, index, include_prerelease
         folder = recorded[r.id].folder if r.id in recorded else naming.release_folder_name("", r.id)
         ReleaseManifest(repository, r.id, r.tag_name, folder, None, None, False, None, ())
     owner_dir, repo_dir = naming.project_folders(repository.owner, repository.repo)
-    project = PureWindowsPath(owner_dir, repo_dir)
+    project = (PureWindowsPath if sys.platform == "win32" else PurePosixPath)(owner_dir, repo_dir)
     releases, proposed = [], dict(recorded)
     for selected in selection.releases:
         release = selected.release

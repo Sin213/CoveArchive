@@ -3,6 +3,7 @@ from types import SimpleNamespace as NS
 import threading
 import sqlite3
 import pytest
+from platform_paths import native_root
 from covearchive.queue import models as m
 from covearchive.queue.store import QueueStore, RunnerLock
 from covearchive.queue.runner import QueueRunner
@@ -22,7 +23,7 @@ class Clock:
     def sleep(self,n): self.sleeps.append(n); self.now=round(self.now+n,9)
 
 def test_Q07_Q08_Q09_Q10_bounded_projects(tmp_path):
-    items=[item(1),item(2),item(3,root='C:/Other'),item(4,root='C:/Third')]
+    items=[item(1),item(2),item(3,root=native_root('C:/Other')),item(4,root=native_root('C:/Third'))]
     # One catalog release contains all current asset ids.
     r=replace(items[0][1],assets=tuple(i[2] for i in items)); items=[(p,r,a,root) for p,_,a,root in items]
     barrier=threading.Barrier(2); lock=threading.Lock(); active=set(); seen=[]; peak=[0]
@@ -92,7 +93,7 @@ def test_Q31_cache_rescan_and_internal_error(tmp_path):
     (g.IncompleteScanError(0,'failed'),'incomplete_scan',False),(ValueError('secret'),'internal_error',False),
     (g.RateLimitError(kind='secondary',status=429,retry_after_seconds=71,retry_at=None),'rate_limited',True)])
 def test_Q17_catalog_negative_cache(tmp_path,error,code,retry):
-    calls=[]; args=[item(1),item(2,root='C:/Other')]; store=QueueStore(tmp_path/'q.db'); store.enqueue_many(args)
+    calls=[]; args=[item(1),item(2,root=native_root('C:/Other'))]; store=QueueStore(tmp_path/'q.db'); store.enqueue_many(args)
     def cat(repo): calls.append(repo); raise error
     runner=QueueRunner(store,catalog=cat,archive=lambda *a,**kw:pytest.fail('archive'),clock=lambda:100)
     runner.run_pending(); jobs=store.list_jobs()
@@ -189,7 +190,7 @@ def test_Q17_catalog_failure_expires(tmp_path):
 
 def test_Q17_many_jobs_share_failure_ttl(tmp_path):
     clock=Clock(); fetch=[]; store=QueueStore(tmp_path/'q.db',clock=clock)
-    store.enqueue_many([item(i,root=f'C:/Archive/{i}') for i in range(1,9)])
+    store.enqueue_many([item(i,root=native_root(f'C:/Archive/{i}')) for i in range(1,9)])
     def cat(repo): fetch.append(clock()); raise g.NetworkError()
     with QueueRunner(store,catalog=cat,clock=clock,rng=lambda:0) as runner: runner.run_pending()
     assert fetch==[100] and store.counts()[S.RETRY_WAIT]==8

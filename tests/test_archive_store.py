@@ -10,11 +10,12 @@ from threading import Barrier
 
 import pytest
 
-from covearchive.archive import naming, store, winfs
+from covearchive.archive import naming, store
+from covearchive.archive.store import winfs
 from covearchive.archive.manifest import AssetRecord
 from covearchive.github.urls import RepositoryTarget
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="requires Windows NTFS handles")
+NTFS_JUNCTION = pytest.mark.skipif(sys.platform != "win32", reason="requires NTFS junction creation via cmd mklink /J")
 DATA = b"synthetic payload"
 SHA = hashlib.sha256(DATA).hexdigest()
 
@@ -29,6 +30,7 @@ def junction(link, target):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@NTFS_JUNCTION
 def test_ensure_directories_and_release_junction(tmp_path):
     repo = RepositoryTarget("owner", "repo")
     folder = naming.release_folder_name("v1", 7)
@@ -104,7 +106,8 @@ def test_failed_stream_cleanup(tmp_path, failure):
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("kind", ["different", "directory", "junction", "during", "during_junction"])
+@pytest.mark.parametrize("kind", ["different", "directory", pytest.param("junction",marks=NTFS_JUNCTION),
+    "during", pytest.param("during_junction",marks=NTFS_JUNCTION)])
 def test_destination_conflicts_are_preserved(tmp_path, kind):
     destination = tmp_path / "asset.bin"
     target = tmp_path / "target"
@@ -241,7 +244,7 @@ def test_writer_lock_required_and_cross_process_busy(tmp_path):
                 with pytest.raises(winfs.ArchiveBusyError):
                     with store.project_writer(root):
                         pass
-                result = process("from covearchive.archive import store, winfs\n"
+                result = process("from covearchive.archive import store\nfrom covearchive.archive.store import winfs\n"
                     "with winfs.ArchiveRoot.open(sys.argv[1]) as root:\n"
                     " try:\n  with store.project_writer(root): pass\n"
                     " except winfs.ArchiveBusyError: print('busy')\n", tmp_path)
@@ -363,7 +366,8 @@ def test_two_processes_publish(tmp_path, same):
 sys.path.insert(0, sys.argv[1])
 from pathlib import Path
 import time
-from covearchive.archive import store, winfs
+from covearchive.archive import store
+from covearchive.archive.store import winfs
 path, data, marker, peer = sys.argv[2:]
 def chunks():
     yield data.encode()[:2]
@@ -420,13 +424,13 @@ def test_symlink_file_and_directory_rejected_if_supported(tmp_path):
         except OSError as exc:
             pytest.skip(f"symlink creation unavailable: {exc}")
         with winfs.ArchiveRoot.open(str(tmp_path)) as root:
-            assert store.verify_asset(root, record()).code == "reparse_point"
-            with pytest.raises(winfs.ArchiveUnsafePathError, match="reparse_point"):
+            assert store.verify_asset(root, record()).code == ("reparse_point" if sys.platform == "win32" else "unsafe_path")
+            with pytest.raises(winfs.ArchiveUnsafePathError, match="reparse_point" if sys.platform == "win32" else "not_regular_file"):
                 store.ensure_release(root, FOLDER, 1)
     finally:
         for link in links:
             if link.is_symlink():
-                if link.is_dir():
+                if sys.platform == "win32" and link.is_dir():
                     link.rmdir()
                 else:
                     link.unlink()
@@ -456,6 +460,7 @@ def test_unindexed_release_reported_without_modification(tmp_path, indexed, kind
             assert not any(winfs.TEMP_PATTERN.fullmatch(name) for name in root.names())
 
 
+@NTFS_JUNCTION
 def test_unindexed_scan_filters_and_rejects_junction(tmp_path):
     for name in ["foreign", "release-empty--2", "release-invalid--0", "release-leading--003"]:
         (tmp_path / name).mkdir()
@@ -471,7 +476,9 @@ def test_unindexed_scan_filters_and_rejects_junction(tmp_path):
         link.rmdir()
 
 @pytest.mark.parametrize("which", ["index", "release"])
-@pytest.mark.parametrize("race", ["appears", "write", "swap", "replace", "unsupported"])
+@pytest.mark.parametrize("race", ["appears", pytest.param("write", marks=pytest.mark.skipif(
+    sys.platform != "win32", reason="requires NTFS share modes denying writes through a held manifest handle")),
+    "swap", "replace", "unsupported"])
 def test_manifest_commit_races(tmp_path, monkeypatch, which, race):
     index, release = documents()
     index = replace(index, releases=())
@@ -673,7 +680,7 @@ def test_f2_new_project_uses_requested_spelling(tmp_path):
 
 
 @pytest.mark.parametrize("where", ["owner", "repo"])
-@pytest.mark.parametrize("kind", ["junction", "file"])
+@pytest.mark.parametrize("kind", [pytest.param("junction",marks=NTFS_JUNCTION), "file"])
 def test_f2_case_variant_unsafe_project_entry(tmp_path, where, kind):
     target = tmp_path / "target"
     target.mkdir()
@@ -996,6 +1003,7 @@ def test_docs_claims_manifest_replacement_limitations():
 
 
 def _r3a_enable_case_sensitive(directory):
+    if sys.platform == "linux": return  # Native Linux test directories are case-sensitive.
     try:
         result = subprocess.run(["fsutil.exe", "file", "setCaseSensitiveInfo", str(directory), "enable"],
                                 capture_output=True, text=True, timeout=15)

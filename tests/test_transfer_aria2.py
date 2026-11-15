@@ -65,6 +65,7 @@ def test_E01_missing_executable(tmp_path, path):
     assert engine.state is EngineState.FAILED
 
 @pytest.mark.parametrize("failure", ["version", "timeout"])
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_E02_version_and_rejection(engine, monkeypatch, failure):
     run = a.subprocess.run
     def wrong(*args, **kwargs):
@@ -75,6 +76,7 @@ def test_E02_version_and_rejection(engine, monkeypatch, failure):
     with pytest.raises(EngineUnavailableError) as caught: engine.start()
     assert caught.value.code == "version"
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_E03_E04_E05_E10_R09_real_start_auth_and_listeners(engine):
     engine.start(); process, private = engine._process, engine._private_dir
     assert engine.state is EngineState.RUNNING and a.listener_pid(engine.port) == {process.pid}
@@ -93,6 +95,7 @@ def test_E03_E04_E05_E10_R09_real_start_auth_and_listeners(engine):
     port = engine.port; engine.stop(); engine.stop(); process_gone(process)
     assert not engine.forced_stop and not private.exists() and a.listener_pid(port) == set()
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_E06_busy_ipv4_not_adopted(engine):
     with socket.socket() as busy:
         busy.bind(("127.0.0.1", 0)); busy.listen()
@@ -101,6 +104,7 @@ def test_E06_busy_ipv4_not_adopted(engine):
         engine.start(); assert engine.port != port
         assert a.listener_pid(port) == {os.getpid()}
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_E07_foreign_real_aria2_untouched(tmp_path, executable):
     foreign = a.Aria2Engine(tmp_path, executable=executable)
     ours = a.Aria2Engine(tmp_path, executable=executable)
@@ -115,6 +119,7 @@ def test_E07_foreign_real_aria2_untouched(tmp_path, executable):
             if item._process is not None and item._process.poll() is None: item._process.terminate()
             item.stop()
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_E08_exit_during_start_cleanup(engine, monkeypatch):
     popen = a.subprocess.Popen; children, directories = [], []
     def short_lived(args, **kwargs):
@@ -127,6 +132,7 @@ def test_E08_exit_during_start_cleanup(engine, monkeypatch):
     for child in children: process_gone(child)
     assert all(not path.exists() for path in directories)
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_security_acl_rejects_everyone(tmp_path):
     private = tmp_path / "private"; sid = a.current_user_sid()
     a.create_private_dir(private, sid)
@@ -136,6 +142,7 @@ def test_security_acl_rejects_everyone(tmp_path):
     assert result.returncode == 0
     assert a.verify_private_acl(private, sid) is False
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_security_config_env_and_spawn(engine, monkeypatch):
     expected = set(("enable-rpc rpc-listen-all rpc-allow-origin-all rpc-listen-port rpc-secret rpc-max-request-size allow-overwrite auto-file-renaming continue "
         "follow-torrent follow-metalink file-allocation max-tries remote-time no-netrc check-certificate min-tls-version enable-dht enable-dht6 bt-enable-lpd "
@@ -189,6 +196,7 @@ def child_guard():
         for child in alive: child.terminate(); child.wait(3)
         assert not alive
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_E06_multi_owner_rule(engine, monkeypatch):
     real_lookup, rejected = a.listener_pid, []
     def conflicting(port):
@@ -198,6 +206,7 @@ def test_E06_multi_owner_rule(engine, monkeypatch):
     monkeypatch.setattr(a, "listener_pid", conflicting)
     engine.start(); assert engine.port != rejected[0]
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_E06_listener_table_all_owners(monkeypatch):
     import ctypes as C
     from ctypes import wintypes as W
@@ -211,6 +220,7 @@ def test_E06_listener_table_all_owners(monkeypatch):
     monkeypatch.setattr(a, "_bind", lambda lib, name, args, result: api if name == "GetExtendedTcpTable" else original(lib, name, args, result))
     assert a.listener_pid(port) == {111, 222}
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_E11_F06_suspended_forced_stop(engine):
     import ctypes as C
     engine.rpc_timeout = .15; engine.start()
@@ -223,6 +233,7 @@ def test_E11_F06_suspended_forced_stop(engine):
     started = time.monotonic(); engine.stop(); process_gone(child)
     assert time.monotonic() - started < 3 and engine.forced_stop and not private.exists()
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_E12_concurrent_stop(engine):
     assert a.Aria2Engine(engine.work_dir, executable=engine.executable, shutdown_grace=.1).shutdown_grace == .1
     engine.shutdown_grace = .1; engine.start(); child, private, failures = engine._process, engine._private_dir, []
@@ -235,6 +246,7 @@ def test_E12_concurrent_stop(engine):
     assert not failures and all(not t.is_alive() for t in threads)
     engine.stop(); process_gone(child); assert not private.exists()
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_F08_R08_engine_context_diagnostics(engine, caplog, monkeypatch):
     with caplog.at_level("DEBUG"):
         with pytest.raises(ValueError):
@@ -320,6 +332,7 @@ def wait_for(engine, job, states, deadline=8):
     pytest.fail(f"State deadline: {status.state}")
 
 @pytest.mark.parametrize("route", ["/data", "/unknown", "/disposition"])
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_T01_T02_T03_complete(engine, http_fixture, route):
     url, body, _ = http_fixture; engine.test_only_allow_loopback_http = True; engine.start()
     before = set(engine.work_dir.parent.iterdir())
@@ -333,6 +346,7 @@ def test_T01_T02_T03_complete(engine, http_fixture, route):
     assert status.progress.total_bytes == len(expected)
     assert set(engine.work_dir.parent.iterdir()) == before and {p.name for p in engine.work_dir.iterdir()} <= {"a.part","a.part.aria2"}
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_T04_T05_T06_T07_T08_controls(engine, http_fixture):
     url, body, _ = http_fixture; engine.test_only_allow_loopback_http = True; engine.start()
     job = engine.submit(DownloadRequest(url + "/slow", "a.part"))
@@ -354,6 +368,7 @@ def test_T04_T05_T06_T07_T08_controls(engine, http_fixture):
     assert (engine.work_dir / "b.part").exists() and (engine.work_dir / "b.part.aria2").exists()
     with pytest.raises(InvalidJobStateError): engine.resume(job)
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_E09_child_killed_during_transfer(engine, http_fixture):
     engine.test_only_allow_loopback_http = True; engine.start()
     job = engine.submit(DownloadRequest(http_fixture[0] + "/slow", "a.part")); wait_for(engine, job, (S.ACTIVE,))
@@ -362,6 +377,7 @@ def test_E09_child_killed_during_transfer(engine, http_fixture):
     assert engine.state is EngineState.FAILED and not private.exists() and engine._secret is None
     with pytest.raises(EngineExitedError): engine._check_alive()
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_T14_expected_size_mismatch(engine, http_fixture):
     engine.test_only_allow_loopback_http = True; engine.start()
     job = engine.submit(DownloadRequest(http_fixture[0] + "/lie", "a.part", expected_size=5))
@@ -375,6 +391,7 @@ def test_T14_expected_size_mismatch(engine, http_fixture):
     assert status.failure.kind is K.SIZE_MISMATCH and engine.status(job) == status
     path = engine.work_dir / "a.part"; assert not path.exists() or path.stat().st_size <= 1024
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_security_policy_and_T17_duplicate_foreign(engine, http_fixture, monkeypatch):
     engine.start(); url = http_fixture[0]
     engine.test_only_allow_loopback_http = True
@@ -397,6 +414,7 @@ def test_F01_F05_failure_mapper(code, message, kind, http_status):
     failure = a.map_failure(code, message, 1, 10)
     assert (failure.kind, failure.aria2_code, failure.http_status) == (kind, code, http_status)
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_D1_delayed_headers_unknown_total(engine, monkeypatch):
     stopped, received, content = threading.Event(), threading.Event(), b"healthy" * 5000
     class Handler(socketserver.StreamRequestHandler):
@@ -421,6 +439,7 @@ def test_D1_delayed_headers_unknown_total(engine, monkeypatch):
     finally: stopped.set(); server.shutdown(); server.server_close(); thread.join(2); assert not thread.is_alive()
 
 @pytest.mark.parametrize("code,kind", [(404,K.HTTP_NOT_FOUND), (429,K.HTTP_RATE_LIMITED), (503,K.HTTP_SERVER_ERROR)])
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_D1_F01_F02_F03_T20_http_failure(engine, http_fixture, code, kind):
     engine.test_only_allow_loopback_http = True; engine.start()
     job = engine.submit(DownloadRequest(http_fixture[0] + f"/{code}", "a.part", expected_size=123))
@@ -428,6 +447,7 @@ def test_D1_F01_F02_F03_T20_http_failure(engine, http_fixture, code, kind):
     assert status.failure.kind is kind and status.failure.http_status == code
     assert status.verified is False and status.publisher_verified is False
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_T09_two_active_one_waiting(engine, http_fixture):
     engine.test_only_allow_loopback_http = True; engine.start()
     jobs = [engine.submit(DownloadRequest(http_fixture[0] + "/slow", f"a{n}.part")) for n in range(3)]
@@ -436,6 +456,7 @@ def test_T09_two_active_one_waiting(engine, http_fixture):
     engine.cancel(jobs[0]); assert wait_for(engine, jobs[2], (S.ACTIVE,)).state is S.ACTIVE
 
 @pytest.mark.parametrize("cap,route", [(1,"/large"), (4,"/large"), (4,"/norange")])
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_T10_T12_connections_and_rangeless(engine, http_fixture, cap, route):
     url, body, requests = http_fixture; engine.test_only_allow_loopback_http = True; engine.start()
     job = engine.submit(DownloadRequest(url + route, "a.part", connections=cap))
@@ -448,6 +469,7 @@ def test_T10_T12_connections_and_rangeless(engine, http_fixture, cap, route):
     if cap == 1: assert requests.peak == 1
     assert (engine.work_dir / "a.part").read_bytes() == body * 8
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_T11_global_limit_and_settings(engine, http_fixture, monkeypatch):
     engine.test_only_allow_loopback_http = True; engine.start()
     settings = TransferSettings(max_active=1, global_speed_limit=51200); engine.update_settings(settings)
@@ -464,6 +486,7 @@ def test_T11_global_limit_and_settings(engine, http_fixture, monkeypatch):
     with pytest.raises(RpcProtocolError): engine.update_settings(TransferSettings(max_active=3))
     assert engine.settings == settings
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_T17_T18_raw_backstop_and_T22_listing(engine, http_fixture):
     engine.test_only_allow_loopback_http = True; engine.start(); path = engine.work_dir / "a.part"; path.write_bytes(b"keep")
     request = DownloadRequest(http_fixture[0] + "/data", "a.part")
@@ -479,6 +502,7 @@ def test_T17_T18_raw_backstop_and_T22_listing(engine, http_fixture):
     assert {p.name for p in engine.work_dir.iterdir()} <= {"a.part", "a.part.aria2", "b.part", "b.part.aria2"}
 
 @pytest.mark.parametrize("name", ["../escape.part", "..\\escape.part", "C:\\escape.part", "a:b.part", "NUL.part", "é.part", "x" * 64 + ".part"])
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_T19_engine_output_validation(engine, monkeypatch, name):
     engine.test_only_allow_loopback_http = True; engine.start()
     before = set(engine.work_dir.parent.iterdir()), set(engine.work_dir.iterdir())
@@ -512,6 +536,7 @@ def resume_case(engine, http_fixture, record_property):
 
 @pytest.mark.parametrize("mode,validator", [("ok",None), ("ignore",None), ("badcr",None), ("shortcr",None),
                                           ("changed",'"v0"'), ("changed",None)])
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_T13_T14_T15_T16_resume_and_F10_limits(resume_case, mode, validator):
     engine, paths, url, original, requests = resume_case; requests.mode = mode; before = file_hashes(paths)
     job = engine.submit(DownloadRequest(url, "a.part", expected_size=300000, resume=True, validator=validator))
@@ -533,6 +558,7 @@ def test_T13_T14_T15_T16_resume_and_F10_limits(resume_case, mode, validator):
             assert len(result) == 300000 and result != original and result != changed
 
 @pytest.mark.parametrize("missing", [0, 1])
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_resume_limits_missing_data_or_control(resume_case, missing, monkeypatch):
     engine, paths, url, _, requests = resume_case; paths[missing].unlink(); before = [p.read_bytes() if p.exists() else None for p in paths]
     original, methods = engine._rpc.call, []
@@ -542,11 +568,13 @@ def test_resume_limits_missing_data_or_control(resume_case, missing, monkeypatch
     with pytest.raises(TargetExistsError): engine.submit(DownloadRequest(url, "a.part"))
     assert not methods and not requests and before == [p.read_bytes() if p.exists() else None for p in paths]
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_resume_limits_garbage_control(resume_case):
     engine, paths, url, _, _ = resume_case; paths[1].write_bytes(b"garbage-control" * 3); before = file_hashes(paths)
     job = engine.submit(DownloadRequest(url, "a.part", expected_size=300000, resume=True))
     assert wait_for(engine, job, (S.FAILED, S.COMPLETED)).state is S.FAILED and file_hashes(paths) == before
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_F07_stop_retains_partial(engine, http_fixture, record_property):
     engine.test_only_allow_loopback_http = True; engine.start()
     job = engine.submit(DownloadRequest(http_fixture[0] + "/slow", "a.part")); end = time.monotonic() + 3
@@ -561,6 +589,7 @@ def test_F07_stop_retains_partial(engine, http_fixture, record_property):
     record_property("control_exists_after_stop", (engine.work_dir / "a.part.aria2").exists())
 
 @pytest.mark.parametrize("self_signed", [True, False])
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_F04_TLS_failures(engine, http_fixture, tmp_path, self_signed, record_property):
     openssl = next((p for p in (Path("C:/Program Files/Git/usr/bin/openssl.exe"), Path("C:/Program Files/Git/mingw64/bin/openssl.exe")) if p.is_file()), None)
     if openssl is None: pytest.skip("Git openssl absent from both approved paths: TLS NOT VERIFIED")
@@ -586,6 +615,7 @@ def test_F04_TLS_failures(engine, http_fixture, tmp_path, self_signed, record_pr
         assert raw_rpc(engine, "getGlobalOption")[1]["result"]["check-certificate"] == "true" and not status.verified
     finally: server.shutdown(); server.server_close(); thread.join(2); assert not thread.is_alive()
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_F05_real_file_io(engine, http_fixture, monkeypatch, record_property):
     engine.test_only_allow_loopback_http = True; engine.start(); original = engine._rpc.call; sid = "*" + a.current_user_sid()
     tool = r"C:\Windows\System32\icacls.exe"
@@ -606,6 +636,7 @@ def test_F05_real_file_io(engine, http_fixture, monkeypatch, record_property):
         result = subprocess.run([tool, str(engine.work_dir), "/remove:d", sid], capture_output=True, timeout=5)
         assert result.returncode == 0
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_security_parent_proxies_stripped(engine, http_fixture, monkeypatch):
     for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"): monkeypatch.setenv(name, "http://127.0.0.1:9")
     popen, environments = a.subprocess.Popen, []
@@ -617,6 +648,7 @@ def test_security_parent_proxies_stripped(engine, http_fixture, monkeypatch):
     assert wait_for(engine, job, (S.COMPLETED, S.FAILED)).state is S.COMPLETED
     assert (engine.work_dir / "a.part").read_bytes() == http_fixture[1][:32768]
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_security_cross_origin_redirect(engine, http_fixture):
     # aria2 follows cross-origin redirects: NO redirect-host enforcement; CA-S7 must use its own no-follow probe and audit currentUri.
     class Redirect(http.server.BaseHTTPRequestHandler):
@@ -631,6 +663,7 @@ def test_security_cross_origin_redirect(engine, http_fixture):
         assert any(path == "/data" for path, _ in http_fixture[2]) and (engine.work_dir / "a.part").read_bytes() == http_fixture[1][:32768]
     finally: server.shutdown(); server.server_close(); thread.join(2); assert not thread.is_alive()
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_security_URL_secrets_in_failures(engine, http_fixture, caplog):
     with caplog.at_level("DEBUG"):
         engine.start(); uri = http_fixture[0] + "/404?token=TOPSECRET"; request = DownloadRequest(uri, "a.part")
@@ -642,6 +675,7 @@ def test_security_URL_secrets_in_failures(engine, http_fixture, caplog):
     for error in (credentials.value, policy.value): diagnostic += str(error) + repr(error) + repr(vars(error))
     assert all(value not in diagnostic for value in ("TOPSECRET", "?token=", "/404", "/private"))
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_security_DETACHED_PROCESS_no_console_or_windows(engine):
     import ctypes as C
     from ctypes import wintypes as W
@@ -670,6 +704,7 @@ def test_security_DETACHED_PROCESS_no_console_or_windows(engine):
     assert enumerated, C.WinError(C.get_last_error())
     assert not windows  # DETACHED_PROCESS avoids even a hidden conhost child.
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_security_ORPHAN_stop_with_process(tmp_path, executable):
     import ctypes as C
     from ctypes import wintypes as W
@@ -697,6 +732,7 @@ def test_security_ORPHAN_stop_with_process(tmp_path, executable):
             if wait(handle,0) == 258: a._bind(kernel,"TerminateProcess",[W.HANDLE,W.UINT],W.BOOL)(handle,1); wait(handle,3000)
             a._bind(kernel,"CloseHandle",[W.HANDLE],W.BOOL)(handle)
 
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_repair3_T17_engine_TOCTOU_options(engine, http_fixture, monkeypatch):
     engine.test_only_allow_loopback_http = True; engine.start(); original = engine._rpc.call; target = engine.work_dir / "a.part"
     def race(method, params=()):
@@ -711,6 +747,7 @@ def test_repair3_T17_engine_TOCTOU_options(engine, http_fixture, monkeypatch):
     assert target.read_bytes() == b"sentinel" and {p.name for p in engine.work_dir.iterdir()} == {"a.part"}
 
 @pytest.mark.parametrize("failure", ["terminate","wait"])
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_repair3_retained_process_blocks_restart(engine, monkeypatch, failure):
     class Retained:
         def poll(self): return None
@@ -728,6 +765,7 @@ def test_repair3_retained_process_blocks_restart(engine, monkeypatch, failure):
         if engine._process is retained: engine._process = None
 
 @pytest.mark.parametrize("fault", ["acl","work_directory","cleanup","state","deadline"])
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_repair3_lifecycle_faults(engine, monkeypatch, fault):
     if fault == "acl":
         created, secure = [], a.create_private_dir
@@ -767,7 +805,8 @@ def test_repair3_lifecycle_faults(engine, monkeypatch, fault):
         assert str(private) not in str(caught.value)+repr(caught.value)+str(caught.value.detail)
     engine.stop(); assert not private.exists(); engine.start()
 
-@pytest.mark.parametrize("fake", [True,False])
+@pytest.mark.parametrize("fake", [True,pytest.param(False, marks=pytest.mark.skipif(sys.platform != "win32",
+    reason="real aria2 submit requires Windows st_file_attributes and native file checks"))])
 @pytest.mark.parametrize("flag,uri,allowed", [(False,"https://example.com/a",True),(False,"http://127.0.0.1/a",False),
     (True,"https://example.com/a",False),(True,"http://127.0.0.1/a",True),(True,"https://[::1]/a",True),(True,"http://localhost/a",False)])
 def test_repair3_URI_policy_parity(tmp_path, fake, flag, uri, allowed):
@@ -781,6 +820,7 @@ def test_repair3_URI_policy_parity(tmp_path, fake, flag, uri, allowed):
 
 @pytest.mark.parametrize("resume", [False,True])
 @pytest.mark.parametrize("name", ["a.part","a.part.aria2"])
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_post1_inaccessible_output(engine, monkeypatch, resume, name):
     engine.test_only_allow_loopback_http=True; engine.start(); original=Path.lstat; target=engine.work_dir/name; calls=[]
     def denied(path,*args,**kwargs):
@@ -792,15 +832,17 @@ def test_post1_inaccessible_output(engine, monkeypatch, resume, name):
     assert not calls and not engine._jobs and caught.value.code == ("resume_files" if resume else "target_inaccessible")
     assert str(target) not in str(caught.value)+repr(caught.value)+str(caught.value.detail)
 
-@pytest.mark.parametrize("fake", [False,True])
+@pytest.mark.parametrize("fake", [pytest.param(False, marks=pytest.mark.skipif(sys.platform != "win32",
+    reason="real aria2 engine requires Win32 job objects, ACLs and listener ownership")),True])
 @pytest.mark.parametrize("field", ["connect_timeout","io_timeout"])
-def test_post1_restart_required(engine, monkeypatch, fake, field):
-    value=FakeEngine() if fake else engine; value.start(); before=value.settings; calls=[]
+def test_post1_restart_required(request, monkeypatch, fake, field):
+    value=FakeEngine() if fake else request.getfixturevalue("engine"); value.start(); before=value.settings; calls=[]
     if not fake: monkeypatch.setattr(value._rpc,"call",lambda *args: calls.append(args))
     with pytest.raises(InvalidSettingsError) as caught: value.update_settings(replace(before,**{field:getattr(before,field)+1}))
     assert caught.value.code == "restart_required" and value.settings == before and not calls
 
 @pytest.mark.parametrize("error", [RpcTimeoutError,RpcProtocolError])
+@pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
 def test_post1_mismatch_removal_retry(engine, http_fixture, monkeypatch, error):
     engine.test_only_allow_loopback_http=True; engine.start(); original=engine._rpc.call; attempts=[]
     job=engine.submit(DownloadRequest(http_fixture[0]+"/slow","a.part",expected_size=3))

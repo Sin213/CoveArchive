@@ -1,5 +1,6 @@
 """Isolated preference persistence and non-destructive failure handling."""
 import json
+import sys
 import pytest
 from covearchive.ui.preferences import PreferenceStore
 from test_ui_window import ui
@@ -7,6 +8,7 @@ from test_ui_window import ui
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
 
 
 def test_roundtrip_and_repository_isolation(tmp_path):
@@ -59,8 +61,12 @@ def test_invalid_schema_preserved(tmp_path, change):
 def test_no_localappdata_has_no_cwd_fallback(monkeypatch,tmp_path):
     monkeypatch.delenv("LOCALAPPDATA")
     store=PreferenceStore(); prefs, problem, writable=store.load()
-    assert store.path is None and problem and not writable
-    assert store.save(prefs)
+    if sys.platform == "win32":
+        assert store.path is None and problem and not writable
+        assert store.save(prefs)
+    else:
+        assert store.path == tmp_path/"config"/"covearchive"/"preferences.json"
+        assert writable and problem is None
     store = PreferenceStore(tmp_path/"prefs.json")
     prefs = store.load()[0]
     store.path.mkdir()

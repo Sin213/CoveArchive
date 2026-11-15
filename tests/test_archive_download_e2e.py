@@ -14,7 +14,8 @@ from contextlib import contextmanager
 import http.server
 
 import pytest
-from covearchive.archive import download as d, manifest as m, store, winfs
+from covearchive.archive import download as d, manifest as m, store
+from covearchive.archive.store import winfs
 from covearchive.github.client import DirectSession
 from covearchive.transfer import resolve as r
 from test_transfer_resolve import fixture_server, asset, BODY, TARGET, SECRET, ScriptAdapter
@@ -48,10 +49,23 @@ def consistent(root):
     assert (folder(root)/"app.zip").read_bytes()==DATA
     no_temps(root)
 
+
+@pytest.mark.skipif(sys.platform != "linux", reason="native Linux filesystem and loopback archive evidence")
+def test_linux_loopback_native_archive_and_reverify(rig):
+    root, server = rig  # fixture_server uses ThreadingHTTPServer on 127.0.0.1.
+    assert root.is_absolute() and not str(root).startswith("C:")
+    assert archive(rig, True).status.value == "ARCHIVED"
+    consistent(root)
+    binary = folder(root)/"app.zip"; inode = binary.stat().st_ino
+    server.requests.clear()
+    assert archive(rig, True).status.value == "VERIFIED_EXISTING"
+    assert binary.stat().st_ino == inode and not server.requests
+
 CRASH=r"""
 import sys,os,hashlib
 sys.path[:0]=[sys.argv[1],sys.argv[2]]
-from covearchive.archive import store,winfs
+from covearchive.archive import store
+from covearchive.archive.store import winfs
 from test_archive_download_e2e import DATA,selected,release,TARGET,r,d
 root,origin,point,publisher=sys.argv[3:]
 item=selected(publisher=='True')
@@ -107,6 +121,7 @@ def test_D18_D20_hard_exit_restart(rig,point,publisher):
     assert archive(rig,publisher).status.value=="VERIFIED_EXISTING"
 
 @pytest.mark.parametrize("position",["owner","repo","release","destination"])
+@pytest.mark.skipif(sys.platform != "win32", reason="requires NTFS junction creation via cmd mklink /J")
 def test_D23_junction_fails_closed(rig,position):
     root,server=rig; outside=root/"untouched"; outside.mkdir(); (outside/"sentinel").write_bytes(b"safe")
     link={"owner":root/"Owner","repo":project(root),"release":folder(root),"destination":folder(root)/"app.zip"}[position]

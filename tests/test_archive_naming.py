@@ -4,10 +4,17 @@ from dataclasses import FrozenInstanceError
 import hashlib
 from itertools import permutations, product
 from pathlib import PureWindowsPath
+from types import SimpleNamespace
 import re
 import unicodedata as ud
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def windows_path_policy(monkeypatch):
+    # These independent string oracles explicitly exercise Windows budgets.
+    monkeypatch.setattr(n, "sys", SimpleNamespace(platform="win32"))
 
 from covearchive.archive import naming as n
 

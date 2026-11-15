@@ -54,6 +54,25 @@ def command(script):
     return lambda launcher: [str(Path(sys.executable).resolve()), "-I", "-B", "-c", script]
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux session and process-group deadline termination")
+def test_linux_deadline_kills_worker_descendants(rig, tmp_path):
+    pidfile = tmp_path/"descendant"
+    script = ("import os,sys,subprocess,time;"
+        "assert os.getsid(0)==os.getpid();"
+        "p=subprocess.Popen([sys.executable,'-I','-B','-c','import time;time.sleep(60)']);"
+        f"open({str(pidfile)!r},'w').write(str(p.pid));time.sleep(60)")
+    controller, events = rig(script, deadline_ms=300)
+    assert controller.start(URL)
+    until(lambda: pidfile.exists())
+    pid = int(pidfile.read_text())
+    until(lambda: events, seconds=2)
+    assert events[0][1] == "TIMED_OUT"
+    def dead():
+        try: return Path(f"/proc/{pid}/stat").read_text().split()[2] == "Z"
+        except FileNotFoundError: return True
+    until(dead)
+
+
 def reply(tail="", payload=None):
     return (f"import sys,json;sys.path.insert(0,{str(ROOT/'src')!r});"
             "from covearchive.scan_worker import encode_error;"

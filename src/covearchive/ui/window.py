@@ -1,6 +1,7 @@
 """Native, read-only release scanner with local filtering and lazy tree rows."""
 
 import logging
+import os
 import sys
 import time
 import unicodedata
@@ -12,7 +13,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QLi
 from covearchive.formats import FORMAT_LABELS, SUPPORTED_EXTENSIONS, DEFAULT_EXTENSIONS
 from covearchive.build_filters import BuildRules, BuildFilterError, parse_patterns, allowed
 from covearchive.archive.naming import validate_root, project_folders, release_folder_name
-from pathlib import PureWindowsPath
+from pathlib import Path
 from covearchive.ui.preferences import PreferenceStore
 from covearchive.ui.archive_bridge import ArchiveBridge, EnqueueRequest, EnqueueItem
 from covearchive.github.select import select_releases
@@ -333,11 +334,11 @@ class MainWindow(QMainWindow):
 
     def _destination(self):
         try:
-            validate_root(self.root.text()); root=PureWindowsPath(self.root.text())
+            validate_root(self.root.text()); root=Path(self.root.text())
             if not self.catalog or not self.tree.model().rows: self.destination.setText(str(root)); return
             owner,repo=project_folders(self.catalog.repository.owner,self.catalog.repository.repo); project=root/owner/repo
             releases={r.id:r for key,(r,asset) in self.eligible.items() if key in self.checked}
-            path=str(project/release_folder_name(next(iter(releases.values())).tag_name,next(iter(releases)))) if len(releases)==1 else f"{len(releases)} release folders under {project}\\" if releases else str(project/"<release folder>")
+            path=str(project/release_folder_name(next(iter(releases.values())).tag_name,next(iter(releases)))) if len(releases)==1 else f"{len(releases)} release folders under {project}{os.sep}" if releases else str(project/"<release folder>")
             self.destination.setText(path+" (existing folder spelling is reused if present)")
         except ValueError: self.destination.setText("Choose an absolute archive root without '..' or device paths")
 
@@ -345,7 +346,7 @@ class MainWindow(QMainWindow):
         if self.enqueue_pending or self.bridge.shutting_down or self._window_closed: return
         items=tuple(EnqueueItem(*pair) for key,pair in self.eligible.items() if key in self.checked)
         if not items or not self.show_catalog: return
-        try: validate_root(self.root.text()); root=str(PureWindowsPath(self.root.text()))
+        try: validate_root(self.root.text()); root=str(Path(self.root.text()))
         except ValueError: self._status("Choose an absolute archive root without '..' or device paths",True); return
         self.enqueue_token+=1; self.enqueue_pending=True; self._selection_changed()
         request=EnqueueRequest(self.enqueue_token,self.catalog.repository,root,items)

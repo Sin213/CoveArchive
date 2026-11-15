@@ -10,6 +10,7 @@ import time
 import unicodedata
 
 import pytest
+from platform_paths import NativePath, native_root
 from PySide6.QtCore import QObject, Signal, Qt, QModelIndex
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtTest import QTest
@@ -47,7 +48,10 @@ class FakeController(QObject):
 
 
 @pytest.fixture(autouse=True)
-def isolated_data(tmp_path,monkeypatch): monkeypatch.setenv("LOCALAPPDATA",str(tmp_path))
+def isolated_data(tmp_path,monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA",str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME",str(tmp_path/"config"))
+    monkeypatch.setenv("XDG_STATE_HOME",str(tmp_path/"state"))
 
 def isolated_window(launcher,controller):
     return MainWindow(launcher,controller,bridge=ArchiveBridge(Path(os.environ["LOCALAPPDATA"])/"q.db"),preferences=PreferenceStore(Path(os.environ["LOCALAPPDATA"])/"prefs.json"))
@@ -345,7 +349,7 @@ def test_C4_saved_rules_and_destination_are_repository_scoped(ui):
     assert "owner/repo" in v.preferences.load()[0]["repositories"]
     v.url.setText(URL); v.scan.click(); c.finish(w.decode_response(w.encode_success(RID,catalog(release())),RID))
     assert v.checked=={(1,1)}
-    v.root.setText("C:/Archive"); assert "Owner" in v.destination.text() and "release-" in v.destination.text()
+    v.root.setText(native_root("C:/Archive")); assert "Owner" in v.destination.text() and "release-" in v.destination.text()
     v.root.setText("relative"); assert "absolute" in v.destination.text().lower()
     v.url.setText("https://github.com/Other/Repo"); v.scan.click()
     other=replace(catalog(release()),repository=type(catalog().repository)("Other","Repo"))
@@ -372,10 +376,10 @@ class WindowBridge(QObject):
 def test_C4b_enqueue_snapshot_duplicate_and_stale(tmp_path):
     b=WindowBridge(); c=FakeController(); v=MainWindow(ROOT/"run_covearchive.py",c,bridge=b,preferences=PreferenceStore(tmp_path/"p.json"))
     succeed(v,c,release(assets=[asset(1,"a.zip"),asset(2,"b.zip"),asset(3,"debug.zip")]))
-    v.checked.update(((1,1),(1,3))); v.exclude.setText("*debug*"); v._selection_changed(); v.root.setText("C:/Archive"); v._archive(); v._archive()
+    v.checked.update(((1,1),(1,3))); v.exclude.setText("*debug*"); v._selection_changed(); v.root.setText(native_root("C:/Archive")); v._archive(); v._archive()
     assert len(b.requests)==1 and b.opens==1; request=b.requests[0]
-    v.root.setText("C:/Later"); v.url.setText("other"); v.include.setText("nothing")
-    assert request.archive_root=="C:\\Archive" and tuple(i.asset.id for i in request.items)==(1,)
+    v.root.setText(native_root("C:/Later")); v.url.setText("other"); v.include.setText("nothing")
+    assert request.archive_root==str(NativePath(native_root("C:/Archive"))) and tuple(i.asset.id for i in request.items)==(1,)
     result=EnqueueResult(request.token,1,0,(("paused",S.PAUSED),),("job",),False,2,None)
     b.enqueued.emit(replace(result,token=request.token-1)); APP.processEvents(); assert v.enqueue_pending
     b.enqueued.emit(result); APP.processEvents(); assert not v.enqueue_pending and "2 earlier queued" in v.status.text() and "Resume/Retry" in v.status.text()
@@ -403,7 +407,7 @@ def test_R3b_destination_empty_bands_and_finishing(ui):
     v,c=ui; v.resize(820,520); APP.processEvents()
     assert all(label.isHidden() for label in (v.rule_error,v.preview,v.held_back,v.detail))
     succeed(v,c,release(1,assets=[asset(i,f"app{i}.zip") for i in range(1,7)]),release(2,assets=[asset(20,"second.zip")]))
-    v.checked.add((2,20)); v.root.setText("C:/Archive"); v._selection_changed(); v.tree.expandAll(); APP.processEvents()
+    v.checked.add((2,20)); v.root.setText(native_root("C:/Archive")); v._selection_changed(); v.tree.expandAll(); APP.processEvents()
     from covearchive.archive.naming import release_folder_name
     assert release_folder_name(v.catalog.releases[1].tag_name,2) in v.destination.text() and "if present" in v.destination.text()
     assert v.tree.visualRect(v.tree.model().index(4,0,v.tree.model().index(0,0))).bottom()<=v.tree.viewport().height()

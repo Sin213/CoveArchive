@@ -16,6 +16,9 @@ if __name__ == "__main__":
     elif "--smoke-test" in sys.argv:
         import tempfile, time
         temporary = tempfile.TemporaryDirectory(); os.environ["LOCALAPPDATA"] = temporary.name
+        if sys.platform != "win32":
+            os.environ["XDG_CONFIG_HOME"] = str(Path(temporary.name)/"config")
+            os.environ["XDG_STATE_HOME"] = str(Path(temporary.name)/"state")
         from PySide6.QtWidgets import QApplication
         from covearchive.ui.window import MainWindow
         app = QApplication(sys.argv)

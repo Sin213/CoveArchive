@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field, replace
 import os
+import signal
 from pathlib import Path
 import sys
 import time
@@ -55,6 +56,9 @@ class ScanController(QObject):
         request_id = uuid4().hex
         request = encode_request(request_id, url)
         process = QProcess(self)
+        if sys.platform == "linux":
+            # Qt's Unix CreateNewSession is the start_new_session equivalent.
+            process.setUnixProcessParameters(QProcess.UnixProcessFlag.CreateNewSession)
         env = QProcessEnvironment()
         for key in ENV_KEYS:
             if key in os.environ: env.insert(key, os.environ[key])
@@ -106,7 +110,7 @@ class ScanController(QObject):
         job.reason = reason; job.deadline.stop(); job.output.clear()
         self.state_changed.emit(job.request_id, "STOPPING")
         if self.job is not job: return
-        job.process.kill()
+        self._kill(job)
         job.reaper.start(KILL_REAP_MS)
         if job.process.state() == QProcess.NotRunning: self._finish(job)
 
@@ -114,7 +118,17 @@ class ScanController(QObject):
         if self.job is not job: return
         self.state_changed.emit(job.request_id, "STOP_SLOW")
         if self.job is not job: return
-        job.process.kill(); job.reaper.start(KILL_REAP_MS)
+        self._kill(job); job.reaper.start(KILL_REAP_MS)
+
+    def _kill(self, job):
+        if sys.platform == "linux":
+            pid = job.process.processId()
+            if pid:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        job.process.kill()
 
     def cancel(self):
         if self.job is not None: self._stop(self.job, "CANCELLED")
@@ -156,6 +170,6 @@ class ScanController(QObject):
         if job is None: return True
         if not job.reason: self._stop(job, "CANCELLED")
         if self.job is job and job.process.state() != QProcess.NotRunning:
-            job.process.kill(); job.process.waitForFinished(timeout_ms)
+            self._kill(job); job.process.waitForFinished(timeout_ms)
         if self.job is job and job.process.state() == QProcess.NotRunning: self._finish(job)
         return self.job is None

@@ -5,6 +5,8 @@ import ntpath
 import os
 import re
 import sqlite3
+import stat
+import sys
 import threading
 import time
 import uuid
@@ -26,6 +28,10 @@ result_status TEXT, integrity TEXT, transferred INTEGER, created_at REAL, update
 _COOLDOWNS='CREATE TABLE cooldowns (scope TEXT PRIMARY KEY, until REAL)'
 
 def default_queue_path():
+    if sys.platform != 'win32':
+        state=os.environ.get('XDG_STATE_HOME','')
+        base=Path(state) if os.path.isabs(state) else Path.home()/'.local'/'state'
+        return base/'covearchive'/'queue.sqlite3'
     root=os.environ.get('LOCALAPPDATA')
     if not root: raise QueueError('localappdata_unset')
     return Path(root)/'CoveArchive'/'queue.sqlite3'
@@ -44,7 +50,13 @@ class QueueStore:
     def __init__(self,path=None,*,settings=None,clock=time.time):
         self.path=Path(path) if path is not None else default_queue_path()
         self.settings=settings or QueueSettings(); self.clock=clock
-        try: self.path.parent.mkdir(parents=True,exist_ok=True)
+        try:
+            if sys.platform == 'win32': self.path.parent.mkdir(parents=True,exist_ok=True)
+            else:
+                missing,directory=[],self.path.parent
+                while not directory.exists():
+                    missing.append(directory); directory=directory.parent
+                for directory in reversed(missing): directory.mkdir(mode=0o700,exist_ok=True)
         except OSError: raise QueueError('database_unavailable') from None
         with self._write(initializing=True) as c:
             version=c.execute('PRAGMA user_version').fetchone()[0]
@@ -120,7 +132,8 @@ class QueueStore:
             if not isinstance(repository,RepositoryTarget) or parse_github_url(
                     'https://github.com/'+repository.owner+'/'+repository.repo)!=repository: raise ValueError
             validate_root(root)
-            root_key=ntpath.normpath(str(root).replace('/','\\')).casefold()
+            root_key=(ntpath.normpath(str(root).replace('/','\\')).casefold()
+                      if sys.platform == 'win32' else str(root))
             if (any(type(i) is not int or not 1<=i<=2**63-1 for i in (release.id,asset.id))
                     or not any(a.id==asset.id for a in release.assets) or release.draft
                     or asset.state!='uploaded' or asset.supported_extension is None
@@ -213,6 +226,21 @@ class QueueStore:
 
 class RunnerLock:
     def __init__(self,path):
+        if sys.platform != 'win32':
+            import fcntl
+            self._file=None
+            fd=None
+            try:
+                fd=os.open(str(path)+'.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK,0o600)
+                info=os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise OSError('unsafe lock')
+                fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                self._file=os.fdopen(fd,'r+b')
+            except OSError:
+                if fd is not None: os.close(fd)
+                raise QueueBusyError('runner_active') from None
+            return
         import msvcrt
         self._file=open(str(path)+'.lock','a+b')
         try:
@@ -224,6 +252,10 @@ class RunnerLock:
             raise QueueBusyError('runner_active') from None
     def close(self):
         if self._file is not None:
+            if sys.platform != 'win32':
+                # Closing the last descriptor releases flock; never unlink it.
+                self._file.close(); self._file=None
+                return
             import msvcrt
             try: self._file.seek(0); msvcrt.locking(self._file.fileno(),msvcrt.LK_UNLCK,1)
             finally: self._file.close(); self._file=None
