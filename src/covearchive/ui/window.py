@@ -15,6 +15,10 @@ from covearchive.build_filters import BuildRules, BuildFilterError, parse_patter
 from covearchive.archive.naming import validate_root, project_folders, release_folder_name
 from pathlib import Path
 from covearchive.ui.preferences import PreferenceStore
+from covearchive.ui.library_store import LibraryStore
+from covearchive.ui.library_panel import LibraryPanel
+from covearchive.queue.store import default_queue_path, QueueError
+from covearchive.ui.branding import app_icon
 from covearchive.ui.archive_bridge import ArchiveBridge, EnqueueRequest, EnqueueItem
 from covearchive.github.select import select_releases
 from covearchive.github.urls import GitHubUrlError, ReleaseTagTarget, parse_github_url
@@ -105,9 +109,10 @@ class OptionalLabel(QLabel):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, launcher=None, controller=None, *, bridge=None, preferences=None):
+    def __init__(self, launcher=None, controller=None, *, bridge=None, preferences=None, library=None):
         super().__init__()
         self.setWindowTitle("CoveArchive"); self.resize(1180,720); self.setMinimumSize(820,520)
+        self.setWindowIcon(app_icon())
         self.controller = controller if controller is not None else ScanController(launcher, parent=self)
         self.catalog = None; self.show_catalog = False; self.active_id = None
         self.started = 0; self.checked=set(); self.eligible={}; self.rules=BuildRules(); self._rules_repo=None; self.enqueue_pending=False
@@ -175,13 +180,20 @@ class MainWindow(QMainWindow):
             QProgressBar::chunk { background:#50E6CF; }
         """)
         self.queue_panel=QueuePanel(self.bridge,self); self.tabs.addTab(self.queue_panel,"Queue")
-        self.tabs.tabBar().setAccessibleName("Browse and Queue tabs"); self.tabs.setAccessibleName("Browse and Queue"); self.tabs.setAccessibleDescription("Switch between build selection and archive queue")
+        self.library_store = library if library is not None else LibraryStore()
+        self.library_panel = LibraryPanel(self.library_store, self, protected=self._protected_roots); self.tabs.addTab(self.library_panel, "Library")
+        self.tabs.tabBar().setAccessibleName("Browse, Queue and Library tabs"); self.tabs.setAccessibleName("Browse, Queue and Library"); self.tabs.setAccessibleDescription("Switch between build selection, archive queue and repository library")
         for previous,following in zip([self.tree,self.tabs,self.queue_panel.start,*self.queue_panel.buttons.values()],[self.tabs,self.queue_panel.start,*self.queue_panel.buttons.values(),self.queue_panel.table]): QWidget.setTabOrder(previous,following)
         self._bridge_slots=((self.bridge.enqueued,self._enqueued),(self.bridge.view_changed,self._queue_view),(self.bridge.shutdown_status,self._shutdown_status))
         for signal,slot in self._bridge_slots: signal.connect(slot,Qt.QueuedConnection)
         self.archive_selected.clicked.connect(self._archive); self.bridge.open()
         window=self.settings["window"]; self.resize(window["width"],window["height"]); self.tabs.setCurrentIndex(window["tab"]=="queue")
         self.url.setFocus()
+
+    def _protected_roots(self):
+        try: queue_dir = default_queue_path().parent
+        except QueueError: queue_dir = None
+        return [queue_dir, self.root.text(), self.settings["archive_root"]]
 
     def _model(self, selection):
         old = self.tree.model(); model = ReleaseModel(selection,self.tree,checked=self.checked,rules=self.rules); self.tree.setModel(model)
@@ -382,7 +394,7 @@ class MainWindow(QMainWindow):
         if not status.intent_saved: text+="; Warning: stop intent not persisted; incomplete jobs may be queued on restart"
         self._status(text); self.queue_panel.message.setText(text); self.archive_selected.setEnabled(False); self.queue_panel.start.setEnabled(False)
         if status.phase=="done":
-            self.settings["window"]=dict(width=self.width(),height=self.height(),tab="queue" if self.tabs.currentIndex() else "browse")
+            self.settings["window"]=dict(width=self.width(),height=self.height(),tab="queue" if self.tabs.currentIndex() == 1 else "browse")
             if self.preferences.writable: self.preferences.save(self.settings)
             self.close()
 
@@ -406,5 +418,6 @@ class MainWindow(QMainWindow):
 
 def main(argv=None, launcher=None):
     app=QApplication.instance() or QApplication(sys.argv if argv is None else argv)
+    app.setWindowIcon(app_icon())
     window=MainWindow(launcher); window.show()
     return app.exec()

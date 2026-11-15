@@ -327,3 +327,46 @@ python -m pytest
 
 The source package lives under `src/`; tests live under `tests/`.
 The project uses the MIT license; see `LICENSE` for its terms.
+
+## CA-S9B: Library (collections and bulk management)
+
+The third tab organizes repository metadata. Library actions never start scans or downloads,
+move/rename/delete archived files, edit Smart Build Filters, or change the archive queue.
+Remove from list removes tracking metadata only. Friendly names do not change repository identity.
+Collections nest up to 8 levels; deleting one keeps its repositories and assigns them to its parent
+(or Unsorted at the top level). Collection rename/move operations change metadata only.
+Selecting a collection browses all descendants; search combines that scope with names,
+repository references, collection paths and providers.
+
+Add a URL, use Bulk Add..., or press Ctrl+V outside a text field. Results report added,
+duplicate-skipped and failed counts. GitHub identity is provider + case-insensitive owner/repo:
+`.git`, `/releases`, `www.github.com`, trailing slash and query/fragment variants deduplicate.
+New repositories enter the selected collection, or Unsorted from All repositories/Unsorted.
+
+Library data is `library.json` beside `preferences.json`: `%LOCALAPPDATA%\CoveArchive` on Windows,
+`$XDG_CONFIG_HOME/covearchive` on Linux, defaulting to `~/.config/covearchive` (relative XDG ignored).
+Loading creates nothing; library data is written only after a user change. Corrupt or newer-version
+library files remain untouched and the Library becomes read-only. Limits are 10,000 repositories,
+2,000 collections and 8 MiB per file. The saved Smart Build Filters limit remains 500 repositories.
+
+Import previews counts before committing; any invalid entry prevents the entire import.
+Export writes the native versioned JSON format, including empty collections, for example:
+```json
+{"format":"covearchive-repository-list","version":1,"collections":["Games"],
+ "repositories":[{"provider":"github","url":"https://github.com/Example/Project","name":null,"collection":"Games","folder":null}]}
+```
+Git-Sync import follows the supplied schema: `format: "Git-Sync data"`, integer `version: 1`,
+`exported` (ignored), `filters`, and `repos`. Each repo uses `name`, `site`, `api`, `repository`,
+`folder`, `filter`, and `keepPreviousVersions`. `repository` is a path, never a URL; `site` is a
+bare host (optional port) or HTTP(S) host without a path or credentials. GitHub defaults to
+github.com; blank `api` is inferred from the host (unknown hosts become `other`). GitLab/Gitea,
+unknown APIs and enterprise GitHub hosts are kept inactive (`other` for the latter two).
+API tokens are case-insensitive; malformed tokens and null/non-string API/site values count as blank. Paths trim outer whitespace/slashes and reject URL syntax and controls.
+Valid string paths in `filters` create even empty collections; malformed items are ignored.
+Fixtures are fictional; no real export file was inspected. Credentials, tokens, history,
+settings and unknown fields are ignored. `filter` is a collection path with trimmed segments,
+not a Smart Build Filter; `folder` is descriptive text only. `keepPreviousVersions=false`
+only produces a notice and never deletes anything; other retention values are ignored.
+
+The shared application icon ships in `src/covearchive/assets/`. This Library slice was verified
+on Windows; Arch shares the code but is not claimed verified by these Windows runs.

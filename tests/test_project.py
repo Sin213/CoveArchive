@@ -13,6 +13,9 @@ from covearchive import __version__
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWLIST = (
+    "src/covearchive/library/__init__.py", "src/covearchive/library/model.py", "src/covearchive/library/transfer.py",
+    "src/covearchive/ui/library_store.py", "src/covearchive/ui/library_panel.py", "src/covearchive/ui/branding.py",
+    "tests/test_library_model.py", "tests/test_library_transfer.py", "tests/test_library_store.py", "tests/test_ui_library.py", "tests/library_fixtures.py",
     "pyproject.toml",
     ".gitignore",
     ".gitattributes",
@@ -67,6 +70,7 @@ def test_pyproject_bootstrap_contract():
     assert isinstance(project["description"], str)
     assert 0 < len(project["description"]) < 120
     assert config["tool"]["setuptools"]["packages"]["find"]["where"] == ["src"]
+    assert config["tool"]["setuptools"]["package-data"] == {"covearchive": ["assets/*.png"]}
     assert config["tool"]["pytest"]["ini_options"] == {
         "pythonpath": ["src"],
         "testpaths": ["tests"],
@@ -155,6 +159,7 @@ def test_imports_succeed_when_optional_third_party_modules_are_blocked():
             "import covearchive.github.urls",
             "import covearchive.github.models, covearchive.github.select",
             "import covearchive.scan_worker, covearchive.ui",
+            "import covearchive.library.model, covearchive.library.transfer",
             "for module in (covearchive, covearchive.formats, covearchive.github.urls):",
             "    assert Path(module.__file__).resolve().is_relative_to(src)",
             "assert sys.modules['requests'] is None",
@@ -215,7 +220,7 @@ def test_new_modules_have_no_dynamic_imports_and_backend_has_no_qt():
                     assert node.func.id not in ("__import__", "import_module")
     script = ("import sys;sys.path.insert(0,sys.argv[1]);sys.modules['PySide6']=None;"
               "import covearchive.formats,covearchive.github.urls,covearchive.github.models,"
-              "covearchive.github.select,covearchive.github.client;assert sys.modules['PySide6'] is None")
+              "covearchive.github.select,covearchive.github.client,covearchive.library.model,covearchive.library.transfer;assert sys.modules['PySide6'] is None")
     result = subprocess.run([sys.executable,"-I","-B","-c",script,str(ROOT/"src")],
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
