@@ -148,14 +148,14 @@ class QueueStore:
     def enqueue(self,repository,release,asset,archive_root):
         return self.enqueue_many(((repository,release,asset,archive_root),))[0]
 
-    def enqueue_many(self,items):
+    def enqueue_many(self,items,*,requeue_completed=True):
         values=[self._validate(*item) for item in items]; result=[]
         with self._write() as c:
             for value in values:
                 old=c.execute('SELECT * FROM jobs WHERE identity=?',(value[0],)).fetchone()
                 if old is not None:
                     outcome='existing'
-                    if old['state']=='COMPLETED':
+                    if requeue_completed and old['state']=='COMPLETED':
                         c.execute("UPDATE jobs SET state='QUEUED',retry_count=0,last_error_code=NULL,next_attempt_at=NULL,claimed_by=NULL,result_status=NULL,integrity=NULL,transferred=NULL,updated_at=? WHERE job_id=?",(self.clock(),old['job_id']))
                         outcome='requeued'
                     result.append(Enqueued(self._get(c,old['job_id']),outcome)); continue

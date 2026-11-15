@@ -22,6 +22,7 @@ MAX_REPOSITORIES = 10000
 MAX_COLLECTIONS = 2000
 MAX_DEPTH = 8
 UNSORTED = ""
+AUTO_ARCHIVE_HOURS = (1, 6, 12, 24)
 _ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
 _HOST = re.compile(r"[A-Za-z0-9.-]+(?::[0-9]{1,5})?")
 _SEGMENT = re.compile(r"[A-Za-z0-9._-]{1,100}")
@@ -127,6 +128,7 @@ class Repository:
     name: str | None = None
     collection: str | None = None
     folder: str | None = None
+    auto_archive: int | None = None
     _ref: str = field(init=False, repr=False, compare=False)
     _identity: str = field(init=False, repr=False, compare=False)
     _label: str = field(init=False, repr=False, compare=False)
@@ -138,6 +140,9 @@ class Repository:
         object.__setattr__(self, "_ref", ref)
         object.__setattr__(self, "_identity", provider + ":" + ref)
         object.__setattr__(self, "_label", label)
+        if self.auto_archive is not None and (type(self.auto_archive) is not int
+                or self.auto_archive not in AUTO_ARCHIVE_HOURS or provider != "github"):
+            _fail("auto_archive")
         if self.name is not None:
             object.__setattr__(self, "name", validate_name(self.name, allow_slash=True))
         if self.collection is not None: _id(self.collection)
@@ -276,7 +281,7 @@ class Library:
         repo = url if isinstance(url, Repository) else Repository(provider, url, name, collection, folder)
         if any(r.identity == repo.identity for r in self.repositories):
             return self.clone()
-        return Library(self.collections, self.repositories + (repo,))
+        return Library(self.collections, self.repositories + (replace(repo, auto_archive=None),))
 
     def _identities(self, identities):
         if isinstance(identities, str):
@@ -296,6 +301,13 @@ class Library:
         selected = self._identities(identities)
         self._parent(collection)
         return Library(self.collections, tuple(replace(r, collection=collection)
+            if r.identity in selected else r for r in self.repositories))
+
+    def set_auto_archive(self, identities, hours):
+        selected = self._identities(identities)
+        if hours is not None and (type(hours) is not int or hours not in AUTO_ARCHIVE_HOURS):
+            _fail("auto_archive")
+        return Library(self.collections, tuple(replace(r, auto_archive=hours)
             if r.identity in selected else r for r in self.repositories))
 
     def rename_repository(self, identity, name):
@@ -365,7 +377,8 @@ def library_from_data(data):
     for c in collections:
         _keys(c, ("id", "name", "parent"))
     for r in repositories:
-        _keys(r, ("provider", "url", "name", "collection", "folder"))
+        keys = ("provider", "url", "name", "collection", "folder")
+        _keys(r, keys + ("auto_archive",) if isinstance(r, dict) and "auto_archive" in r else keys)
     return Library(tuple(Collection(**c) for c in collections), tuple(Repository(**r) for r in repositories))
 
 
@@ -376,7 +389,8 @@ def library_to_data(library):
     return {"version": 1,
         "collections": [{"id": c.id, "name": c.name, "parent": c.parent} for c in library.collections],
         "repositories": [{"provider": r.provider, "url": r.url, "name": r.name,
-            "collection": r.collection, "folder": r.folder} for r in library.repositories]}
+            "collection": r.collection, "folder": r.folder,
+            **({"auto_archive": r.auto_archive} if r.auto_archive is not None else {})} for r in library.repositories]}
 
 
 def load_library(raw):

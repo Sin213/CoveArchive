@@ -27,6 +27,7 @@ class EnqueueRequest:
     repository: RepositoryTarget
     archive_root: str
     items: tuple[EnqueueItem, ...]
+    requeue_completed: bool = True
     def __post_init__(self): object.__setattr__(self, "items", tuple(self.items))
 
 @dataclass(frozen=True)
@@ -206,7 +207,8 @@ class ArchiveBridge(QObject):
 
     def _enqueue(self, request):
         if not self.is_open or self.shutting_down: raise QueueError("queue_unavailable")
-        rows = self._store.enqueue_many(tuple((request.repository, i.release, i.asset, request.archive_root) for i in request.items))
+        rows = self._store.enqueue_many(tuple((request.repository, i.release, i.asset, request.archive_root) for i in request.items),
+            requeue_completed=request.requeue_completed)
         changed = tuple(r.job.job_id for r in rows if r.outcome != "existing")
         existing = tuple((r.job.job_id, r.job.state) for r in rows if r.outcome == "existing")
         started, pending, startup_error = self._startup(changed)

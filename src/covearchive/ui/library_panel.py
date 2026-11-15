@@ -2,10 +2,11 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from PySide6 import QtWidgets as W
-from PySide6.QtCore import QAbstractTableModel, Qt, QTimer
+from PySide6.QtCore import QAbstractTableModel, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from covearchive.library import model as m, transfer as t
 from covearchive.ui.library_store import atomic_write
+from covearchive.auto_archive import NEEDS_RULES
 
 
 def reason(code):
@@ -22,12 +23,19 @@ def reason(code):
 
 class RepositoryModel(QAbstractTableModel):
     def rowCount(self, parent=None): return 0 if parent is not None and parent.isValid() else len(self.rows)
-    def columnCount(self, parent=None): return 4
+    def columnCount(self, parent=None): return 6
     def data(self, index, role=Qt.DisplayRole):
-        if index.isValid() and role == Qt.DisplayRole: return self.labels[index.row()][index.column()]
+        if index.isValid() and index.column()>=4 and role in (Qt.DisplayRole,Qt.ToolTipRole):
+            repo=self.rows[index.row()]; auto=self.parent().auto
+            text=(auto.summary(repo) if auto else 'Off') if index.column()==4 else (auto.schedule_text(repo) if auto else 'Last - / Next -')
+            status=auto.status(repo.ref) if auto else None
+            if role==Qt.ToolTipRole and index.column()==4 and status and status.message: text+='\n'+status.message
+            return text
+        if index.isValid() and role == Qt.DisplayRole:
+            return self.labels[index.row()][index.column()]
         if index.isValid() and index.column() == 1 and role == Qt.ToolTipRole: return self.rows[index.row()].url
     def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if orientation == Qt.Horizontal and role == Qt.DisplayRole: return ("Name", "Repository", "Collection", "Status")[section]
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole: return ("Name", "Repository", "Collection", "Status", "Auto-Archive", "Last / next check")[section]
     def set_rows(self, library, rows):
         self.beginResetModel(); self.rows = rows
         paths = library.collection_paths
@@ -42,9 +50,10 @@ def _prepare_import(path, snapshot):
 
 
 class LibraryPanel(W.QWidget):
-    def __init__(self, store, parent=None, protected=lambda: ()):
+    changed=Signal()
+    def __init__(self, store, parent=None, protected=lambda: (), auto=None):
         super().__init__(parent)
-        self.protected = protected
+        self.protected = protected; self.auto=auto
         self.store = store; self.library, _, _ = store.load(); self.scope = None
         self.busy = self._closed = False; self._worker = ThreadPoolExecutor(max_workers=1)
         self._poll = QTimer(self); self._poll.setInterval(25); self._poll.timeout.connect(self._finish_import)
@@ -72,22 +81,26 @@ class LibraryPanel(W.QWidget):
         self.table.setSelectionMode(W.QAbstractItemView.ExtendedSelection); self.table.verticalHeader().hide()
         self.table.verticalHeader().setSectionResizeMode(W.QHeaderView.Fixed); self.table.verticalHeader().setDefaultSectionSize(26)
         self.table.horizontalHeader().setSectionResizeMode(W.QHeaderView.Stretch); right.addWidget(self.table)
-        self.table.horizontalHeader().setSectionResizeMode(3, W.QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setMinimumSectionSize(84)
+        for column in (3,4,5): self.table.horizontalHeader().setSectionResizeMode(column,W.QHeaderView.ResizeToContents)
         actions = W.QHBoxLayout(); right.addLayout(actions)
         self.move = button("Move to...", self._move, actions); self.rename = button("Rename...", self._rename, actions)
         self.remove = button("Remove from list...", self._remove, actions)
+        self.auto_button=button('Auto-Archive...',self._auto_archive,actions)
+        self.auto_detail=W.QLabel(); self.auto_detail.setTextFormat(Qt.PlainText); self.auto_detail.setWordWrap(True); layout.addWidget(self.auto_detail)
         self.status = W.QLabel(); self.status.setTextFormat(Qt.PlainText); self.status.setWordWrap(True); layout.addWidget(self.status)
         controls = [self.url, self.add, self.bulk, self.import_button, self.export_button, self.search, self.tree,
-            self.new, self.rename_collection, self.delete, self.table, self.move, self.rename, self.remove, self.status]
+            self.new, self.rename_collection, self.delete, self.table, self.move, self.rename, self.remove, self.auto_button,self.auto_detail,self.status]
         for widget, name in zip(controls, ["Repository URL", "Add repository", "Bulk add", "Import library", "Export library",
                 "Search library", "Collections", "New collection", "Rename collection", "Delete collection", "Repositories",
-                "Move repositories", "Rename repository", "Remove repositories", "Library status"]):
+                "Move repositories", "Rename repository", "Remove repositories", "Auto-Archive settings","Auto-Archive details","Library status"]):
             widget.setAccessibleName(name); widget.setAccessibleDescription(name)
         for first, second in zip(controls, controls[1:]): self.setTabOrder(first, second)
         self.paste_shortcut = QShortcut(QKeySequence.StandardKey.Paste, self)
         self.paste_shortcut.setContext(Qt.WidgetWithChildrenShortcut); self.paste_shortcut.activated.connect(self._paste)
         self.search.textChanged.connect(self._filter); self.tree.currentItemChanged.connect(self._scope)
-        self.table.selectionModel().selectionChanged.connect(lambda *_: self._lock())
+        self.table.selectionModel().selectionChanged.connect(lambda *_: (self._lock(),self._show_auto_detail()))
+        if self.auto is not None: self.auto.changed.connect(self._auto_changed)
         self.url.returnPressed.connect(self._add); self.refresh(); self._lock()
 
     def _lock(self):
@@ -98,6 +111,7 @@ class LibraryPanel(W.QWidget):
         for widget in (self.rename_collection, self.delete): widget.setEnabled(self.store.writable and bool(self.scope))
         count = len(self.table.selectionModel().selectedRows())
         for widget in (self.move, self.remove, self.rename): widget.setEnabled(self.store.writable and (count == 1 if widget is self.rename else count > 0))
+        self.auto_button.setEnabled(self.store.writable and count>0 and self.auto is not None)
 
     def _transaction(self, op):
         if not self.store.writable: return False
@@ -107,7 +121,47 @@ class LibraryPanel(W.QWidget):
         problem = self.store.save(candidate)
         self._lock()
         if problem: self.status.setText(problem); return False
-        self.library = candidate; self.refresh(); return True
+        self.library = candidate; self.refresh(); self.changed.emit(); return True
+
+    def _show_auto_detail(self):
+        rows=self.table.selectionModel().selectedRows()
+        self.auto_detail.setText(self.auto.detail(self.model.rows[rows[0].row()]) if self.auto is not None and len(rows)==1 else '')
+
+    def _auto_changed(self):
+        if self.model.rows: self.model.dataChanged.emit(self.model.index(0,4),self.model.index(len(self.model.rows)-1,5),[Qt.DisplayRole,Qt.ToolTipRole])
+        self._show_auto_detail()
+
+    def _auto_archive(self):
+        if self.auto is None or not self.store.writable: return
+        selected=set(self._selected()); repos=[r for r in self.model.rows if r.identity in selected]
+        if not repos: return
+        hours=repos[0].auto_archive; choices=['Off','Every 1 hour','Every 6 hours','Every 12 hours','Every 24 hours']
+        name,ok=W.QInputDialog.getItem(self,'Auto-Archive','Check interval',choices,0 if hours is None else m.AUTO_ARCHIVE_HOURS.index(hours)+1,False)
+        if not ok: return
+        hours=(None,*m.AUTO_ARCHIVE_HOURS)[choices.index(name)]; skipped=0
+        def noun(count): return 'repository' if count==1 else 'repositories'
+        interval=f'{hours} hour'+('' if hours==1 else 's')
+        if hours is not None:
+            active=[r for r in repos if r.active]; skipped=len(repos)-len(active); repos=active
+            if not repos: self.status.setText(f'No active GitHub {noun(skipped)} selected; {skipped} inactive {noun(skipped)} skipped'); return
+            problems=[(repo,problem) for repo in repos if (problem:=self.auto.problem(repo))]
+            if problems:
+                repo,problem=problems[0]; reason='no saved rules' if problem==NEEDS_RULES else 'no saved archive folder'
+                count=sum(p==problem for _,p in problems)
+                text=f"Not enabled: '{repo.display_name}' has {reason}. {problem}"
+                if len(selected)>1: text+=f' ({count} of {len(selected)} selected repositories need this.)'
+                self.status.setText(text); return
+            root=self.auto.settings()['archive_root']
+            text=(f'Enable Auto-Archive for {len(repos)} {noun(len(repos))} every {interval}? Checks run only while CoveArchive is open. '
+                f'The first check happens in {interval}, using the saved archive folder: {root}. '
+                'It queues every release asset matching the saved rules that is not already queued (possibly many). '
+                'Downloads may start automatically and use disk space and bandwidth. Existing archives are never deleted. Downloads follow the queue rules.')
+            if W.QMessageBox.question(self,'Enable Auto-Archive',text,W.QMessageBox.Yes|W.QMessageBox.No,W.QMessageBox.No)!=W.QMessageBox.Yes: return
+        ids=[r.identity for r in repos]
+        if self._transaction(lambda lib:lib.set_auto_archive(ids,hours)):
+            text=(f'Auto-Archive on for {len(ids)} {noun(len(ids))} every {interval}; first check in {interval}' if hours is not None else
+                f'Auto-Archive off for {len(ids)} {noun(len(ids))}; archives and queued downloads are unchanged')
+            self.status.setText(text+(f'; {skipped} inactive {noun(skipped)} skipped' if skipped else ''))
 
     def refresh(self):
         self.tree.blockSignals(True); self.tree.clear()
@@ -130,7 +184,7 @@ class LibraryPanel(W.QWidget):
 
     def _scope(self, current, previous):
         self.scope = current.data(0, Qt.UserRole) if current else None; self._filter()
-    def _filter(self): self.model.set_rows(self.library, self.library.browse(self.scope, search=self.search.text())); self._lock()
+    def _filter(self): self.model.set_rows(self.library, self.library.browse(self.scope, search=self.search.text())); self._lock(); self._show_auto_detail()
     def _selected(self): return [self.model.rows[i.row()].identity for i in self.table.selectionModel().selectedRows()]
     def _add(self, checked=False, *, text=None):
         if not self.store.writable: return

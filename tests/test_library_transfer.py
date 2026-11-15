@@ -279,3 +279,17 @@ def test_slash_friendly_name_roundtrip_and_native_blank_name_rejected():
     assert t.build_plan(t.export_library(lib), m.Library()).apply(m.Library()) == lib
     doc = native_document(1); doc["repositories"][0]["name"] = "  "
     assert not t.build_plan(encoded(doc), m.Library()).valid
+def test_auto_archive_import_export_never_enable():
+    lib = m.Library().add_repository("https://github.com/o/r").set_auto_archive("github:o/r", 6)
+    raw = t.export_library(lib)
+    assert b"auto_archive" not in raw
+    imported = t.build_plan(raw, m.Library()).apply(m.Library())
+    assert imported.repositories[0].auto_archive is None
+    native = native_document(1)
+    assert t.build_plan(encoded(native), m.Library()).apply(m.Library()).repositories[0].auto_archive is None
+    native["repositories"][0]["auto_archive"] = 6
+    plan = t.build_plan(encoded(native), m.Library())
+    assert not plan.valid and plan.invalid == ((1, "schema"),)
+    git_sync = json.loads(encoded(GIT_SYNC_LITERAL)); git_sync["repos"][0]["auto_archive"] = 6
+    imported = t.build_plan(encoded(git_sync), m.Library()).apply(m.Library())
+    assert imported.repositories[0].auto_archive is None

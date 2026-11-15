@@ -194,7 +194,8 @@ uploaded asset: pure planning, fresh API resolution, bounded streaming to an
 exclusive opaque NTFS temp, size/SHA-256 verification, no-replace publication,
 then release.json followed by archive-index.json. Assets remain in per-release folders.
 Anonymous requests only: private repositories are unsupported. CA-S8 supplies the queue
-backend and GUI download controls; a scheduler daemon and repository monitoring/Auto-Archive are not implemented.
+backend and GUI download controls. A scheduler daemon, background service or tray agent is
+not implemented; opt-in checks while the window is open are described in CA-A1: Auto-Archive below.
 
 Production uses HTTPS with TLS verification, no credentials/cookies, no environment
 proxies/netrc/CA overrides, no automatic redirects, and identity byte encoding.
@@ -304,8 +305,9 @@ Each interrupted run consumes one attempt; exhausting the attempt limit leaves F
 CA-S7 always re-verifies archive truth; queue COMPLETED is never proof of intact bytes.
 Progress and measured speed remain in memory; retry scheduling uses wall-clock timestamps.
 Clock rewind can delay retries. Restarted incomplete transfers start from byte zero: no byte-level resume.
-Bandwidth throttling and start delay remain deferred. A scheduler daemon, repository
-monitoring and Auto-Archive are not implemented.
+Bandwidth throttling and start delay remain deferred. A scheduler daemon, background
+service or tray agent is not implemented. See CA-A1: Auto-Archive below for opt-in monitoring
+while the window is open.
 CA-S2 GitHub catalog discovery is not cancellable: controls/shutdown take effect after it returns.
 Final CA-S7 filesystem phases are not cancellable. An uncommitted published file without
 a publisher digest is downloaded again by CA-S7 to establish proof.
@@ -330,8 +332,11 @@ The project uses the MIT license; see `LICENSE` for its terms.
 
 ## CA-S9B: Library (collections and bulk management)
 
-The third tab organizes repository metadata. Library actions never start scans or downloads,
-move/rename/delete archived files, edit Smart Build Filters, or change the archive queue.
+The third tab organizes repository metadata. Library actions never move/rename/delete
+archived files or edit Smart Build Filters. Auto-Archive is the single opt-in exception to
+metadata-only actions: after the user enables it, checks run only while CoveArchive is open
+and enqueue matching assets only through the existing archive queue. Other Library actions
+never start scans or downloads or change the archive queue.
 Remove from list removes tracking metadata only. Friendly names do not change repository identity.
 Collections nest up to 8 levels; deleting one keeps its repositories and assigns them to its parent
 (or Unsorted at the top level). Collection rename/move operations change metadata only.
@@ -370,3 +375,39 @@ only produces a notice and never deletes anything; other retention values are ig
 
 The shared application icon ships in `src/covearchive/assets/`. This Library slice was verified
 on Windows; Arch shares the code but is not claimed verified by these Windows runs.
+
+## CA-A1: Auto-Archive
+
+Auto-Archive is off by default. Add, Bulk Add, import, export-then-import and removing
+then re-adding a repository never enable it. On the Library tab, select repositories and
+choose **Auto-Archive...**, then Off or an interval of 1, 6, 12 or 24 hours. Enabling requires
+Smart Build Filters for each repository and an archive root that were saved successfully;
+unsaved changes and failed saves do not qualify. Missing prerequisites
+produce an actionable message without changing any watch. The consent dialog defaults to No.
+Only active GitHub repositories can be enabled; GitLab scheduling is not supported.
+
+Checks use a second scan worker process, the same GitHub discovery and saved filters, and
+the existing durable queue. The first check queues every matching release asset not already
+queued, potentially many assets. Existing jobs in any state, including COMPLETED, FAILED,
+CANCELLED, QUEUED and RUNNING, are neither modified nor duplicated by automatic checks.
+Queue startup follows the existing enqueue rules: restored or earlier pending jobs require
+**Start Queue** on the Queue tab.
+Queue jobs are per archive folder. Browse's Archive Selected saves the folder it used;
+changing that saved folder makes the next check queue matching assets for the new folder.
+
+Checks run only while the window is open, never at startup. Every launch re-arms a full
+interval; a 24-hour watch requires the window to stay open for 24 hours. Check history is
+kept only in memory. The Library's Auto-Archive and Last / next check columns and detail
+line show status, last/next check times and actionable errors. The Last / next check column
+has a full-text tooltip; the Auto-Archive tooltip includes the last result or actionable error.
+
+Offline, timeout, server and queue-unavailable failures retry after 5, 15 and 30 minutes;
+the fourth consecutive failure waits the regular interval. GitHub rate-limit hints are
+clamped to 1-60 minutes and pause checks for all watches. Permanent errors wait the regular
+interval and display an actionable message. Turning Auto-Archive off or removing a repository
+stops future checks only: archives are never deleted and already queued work is not cancelled.
+
+The version-1 `library.json` gains an optional `auto_archive` key, written only when enabled.
+Older builds treat a library containing this key as unreadable and make it read-only.
+Export/import do not carry the setting. Auto-Archive was verified on Windows only;
+Arch shares the code but is not claimed verified by these Windows runs.

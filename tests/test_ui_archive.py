@@ -108,7 +108,7 @@ def test_snapshots_enqueue_identity_root_and_no_start(rig):
 
 def test_duplicate_inflight_and_refresh_coalescing(rig,monkeypatch):
     bridge,sink=rig(); entered=threading.Event(); release=threading.Event(); real=bridge._store.enqueue_many
-    def blocked(items): entered.set(); assert release.wait(3); return real(items)
+    def blocked(items,**kw): entered.set(); assert release.wait(3); return real(items,**kw)
     monkeypatch.setattr(bridge._store,"enqueue_many",blocked)
     try:
         assert bridge.enqueue(request()); assert entered.wait(3)
@@ -685,3 +685,19 @@ def test_H2_committed_result_survives_startup_read_failure(rig,monkeypatch,actio
     assert result.startup_error=="database_busy" and not result.started and bridge.is_open
     again = submit(bridge,sink,request(9))
     assert len(again.existing)==1 and again.created==0 and len(real())==1
+def test_auto_archive_bridge_preserves_completed_manual_requeues(rig):
+    bridge,sink=rig(); first=submit(bridge,sink); job_id=first.job_ids[0]
+    bridge._store.claim_next('owner')
+    bridge._store.finish(job_id,'owner',S.COMPLETED,result=NS(status='ARCHIVED'),retry_count=3)
+    before=bridge._store.get(job_id)
+    req=request(-1)
+    req=EnqueueRequest(req.token,req.repository,req.archive_root,req.items,requeue_completed=False)
+    automatic=submit(bridge,sink,req)
+    assert automatic.error is None and automatic.created==automatic.requeued==0
+    assert automatic.existing==((job_id,S.COMPLETED),) and automatic.job_ids==()
+    assert bridge._store.get(job_id)==before
+    assert len(bridge._store.list_jobs())==1
+    assert EnqueueRequest(-2,req.repository,req.archive_root,req.items,requeue_completed=False).requeue_completed is False
+    assert request().requeue_completed is True
+    manual=submit(bridge,sink,request(2))
+    assert manual.requeued==1 and manual.created==0 and bridge._store.get(job_id).state==S.QUEUED

@@ -292,3 +292,72 @@ def test_ten_thousand_entry_search_and_mutation_performance():
     assert len(found) == 1 and found[0].identity == "github:fictional/repo9999"
     assert moved.repositories[-1].collection == "group" and lib.repositories[-1].collection is None
     assert search_ms <= 300 and create_ms <= 300 and move_ms <= 300
+def test_auto_archive_loader_accepts_optional_key():
+    data = m.library_to_data(m.Library().add_repository("https://github.com/o/r"))
+    data["repositories"][0]["auto_archive"] = 6
+    try: lib = m.library_from_data(data)
+    except m.LibraryError as exc: pytest.fail("optional auto_archive rejected: " + exc.code)
+    assert lib.repositories[0].auto_archive == 6
+    assert m.load_library(m.dump_library(lib)) == lib
+
+
+def test_auto_archive_default_off_and_legacy_bytes():
+    raw = b'{"version":1,"collections":[],"repositories":[{"provider":"github","url":"https://github.com/o/r","name":null,"collection":null,"folder":null}]}\n'
+    lib = m.load_library(raw)
+    assert lib.repositories[0].auto_archive is None and m.dump_library(lib) == raw
+    assert m.Repository("github", "https://github.com/o/r").auto_archive is None
+    assert m.add_urls(m.Library(), "https://github.com/o/r").library == lib
+    enabled = lib.set_auto_archive("github:o/r", 6)
+    assert lib.repositories[0].auto_archive is None
+    assert m.Library().add_repository(enabled.repositories[0]) == lib
+    assert enabled.remove_repositories("github:o/r").add_repository("https://github.com/o/r") == lib
+    assert enabled.set_auto_archive("github:o/r", None) == lib
+    assert m.dump_library(enabled.set_auto_archive("github:o/r", None)) == raw
+
+
+@pytest.mark.parametrize("hours", [1, 6, 12, 24])
+def test_auto_archive_retained_by_metadata_operations(hours):
+    assert m.AUTO_ARCHIVE_HOURS == (1, 6, 12, 24)
+    lib = sample().set_auto_archive("github:owner/one", hours)
+    changed = lib.rename_repository("github:owner/one", "New").move_repositories("github:owner/one", "b")
+    changed = changed.rename_collection("a", "Renamed").move_collection("b", None).delete_collection("b")
+    assert changed.repositories[0].auto_archive == hours
+    assert m.load_library(m.dump_library(changed)) == changed
+    with pytest.raises(m.LibraryError) as exc: lib.set_auto_archive("github:missing/repo", hours)
+    assert exc.value.code == "repository_missing"
+
+
+@pytest.mark.parametrize("hours", [True, False, 3, 6.0, "6", 0, 2, 25])
+def test_auto_archive_invalid_values(hours):
+    with pytest.raises(m.LibraryError) as exc: m.Repository("github", "https://github.com/o/r", auto_archive=hours)
+    assert exc.value.code == "auto_archive"
+    lib = m.Library().add_repository("https://github.com/o/r")
+    with pytest.raises(m.LibraryError) as exc: lib.set_auto_archive("github:o/r", hours)
+    assert exc.value.code == "auto_archive"
+
+
+@pytest.mark.parametrize("provider", ["gitlab", "gitea", "other"])
+def test_auto_archive_inactive_provider_rejected(provider):
+    with pytest.raises(m.LibraryError) as exc: m.Repository(provider, "https://host/o/r", auto_archive=6)
+    assert exc.value.code == "auto_archive"
+
+
+@pytest.mark.parametrize("hours", [True, 3, 6.0, "6", 0, 25])
+def test_auto_archive_invalid_file_stays_read_only(tmp_path, monkeypatch, hours):
+    from covearchive.ui.library_store import LibraryStore
+    for key in ("LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_STATE_HOME"): monkeypatch.setenv(key, str(tmp_path/key))
+    data = m.library_to_data(m.Library().add_repository("https://github.com/o/r"))
+    data["repositories"][0]["auto_archive"] = hours
+    with pytest.raises(m.LibraryError) as exc: m.library_from_data(data)
+    assert exc.value.code == "auto_archive"
+    path = tmp_path/"library.json"; raw = json.dumps(data).encode(); path.write_bytes(raw)
+    store = LibraryStore(path); lib, problem, writable = store.load()
+    assert not writable and problem and not lib.repositories
+    assert store.save(m.Library()) and path.read_bytes() == raw
+
+
+def test_auto_archive_loader_keeps_strict_keys():
+    data = m.library_to_data(m.Library().add_repository("https://github.com/o/r"))
+    data["repositories"][0].update(auto_archive=6, unknown=True)
+    with pytest.raises(m.LibraryError) as exc: m.library_from_data(data)
+    assert exc.value.code == "schema"

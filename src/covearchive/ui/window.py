@@ -24,6 +24,7 @@ from covearchive.github.select import select_releases
 from covearchive.github.urls import GitHubUrlError, ReleaseTagTarget, parse_github_url
 from covearchive.scan_worker import ProtocolError, ScanFailure
 from covearchive.ui.scan_process import ScanController
+from covearchive.ui.auto_archive import AutoArchive
 
 
 from covearchive.ui.queue_panel import display, size_text, state_text, QueuePanel, _error
@@ -109,7 +110,7 @@ class OptionalLabel(QLabel):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, launcher=None, controller=None, *, bridge=None, preferences=None, library=None):
+    def __init__(self, launcher=None, controller=None, *, bridge=None, preferences=None, library=None, auto_scan=None, auto_clock=time.time):
         super().__init__()
         self.setWindowTitle("CoveArchive"); self.resize(1180,720); self.setMinimumSize(820,520)
         self.setWindowIcon(app_icon())
@@ -119,6 +120,8 @@ class MainWindow(QMainWindow):
         self.bridge=bridge if bridge is not None else ArchiveBridge(parent=self)
         self.preferences=preferences if preferences is not None else PreferenceStore()
         self.settings, self.preference_problem, _=self.preferences.load()
+        self.auto=AutoArchive(auto_scan if auto_scan is not None else ScanController(launcher,parent=self),self.bridge,
+            lambda:self.library_panel.library,lambda:self.preferences.load()[0],clock=auto_clock,parent=self)
         self.enqueue_token=0; self.last_view=None; self._close_status=None; self._window_closed=False
         central = QWidget(); self.tabs=QTabWidget(); self.setCentralWidget(self.tabs); self.tabs.addTab(central,"Browse"); layout = QVBoxLayout(central); layout.setSpacing(4); layout.setContentsMargins(8,8,8,8)
         layout.addWidget(QLabel("CoveArchive - part of the Cove Nexus family"))
@@ -169,6 +172,7 @@ class MainWindow(QMainWindow):
         self.cancel.clicked.connect(self.controller.cancel); self.prereleases.toggled.connect(self._refresh)
         self.controller.state_changed.connect(self._state); self.controller.terminal.connect(self._terminal)
         QApplication.instance().aboutToQuit.connect(self.controller.shutdown)
+        QApplication.instance().aboutToQuit.connect(self.auto.shutdown)
         self.setStyleSheet("""
             QWidget { background:#182125; color:#EDF4F4; font-size:13px; }
             QLineEdit,QTreeView { background:#10191D; border:1px solid #53696D; padding:5px; }
@@ -181,7 +185,8 @@ class MainWindow(QMainWindow):
         """)
         self.queue_panel=QueuePanel(self.bridge,self); self.tabs.addTab(self.queue_panel,"Queue")
         self.library_store = library if library is not None else LibraryStore()
-        self.library_panel = LibraryPanel(self.library_store, self, protected=self._protected_roots); self.tabs.addTab(self.library_panel, "Library")
+        self.library_panel = LibraryPanel(self.library_store, self, protected=self._protected_roots,auto=self.auto); self.tabs.addTab(self.library_panel, "Library")
+        self.library_panel.changed.connect(self.auto.sync)
         self.tabs.tabBar().setAccessibleName("Browse, Queue and Library tabs"); self.tabs.setAccessibleName("Browse, Queue and Library"); self.tabs.setAccessibleDescription("Switch between build selection, archive queue and repository library")
         for previous,following in zip([self.tree,self.tabs,self.queue_panel.start,*self.queue_panel.buttons.values()],[self.tabs,self.queue_panel.start,*self.queue_panel.buttons.values(),self.queue_panel.table]): QWidget.setTabOrder(previous,following)
         self._bridge_slots=((self.bridge.enqueued,self._enqueued),(self.bridge.view_changed,self._queue_view),(self.bridge.shutdown_status,self._shutdown_status))
@@ -189,6 +194,7 @@ class MainWindow(QMainWindow):
         self.archive_selected.clicked.connect(self._archive); self.bridge.open()
         window=self.settings["window"]; self.resize(window["width"],window["height"]); self.tabs.setCurrentIndex(window["tab"]=="queue")
         self.url.setFocus()
+        self.auto.start()
 
     def _protected_roots(self):
         try: queue_dir = default_queue_path().parent
@@ -401,10 +407,12 @@ class MainWindow(QMainWindow):
     def closeEvent(self,event):
         if not self.controller.shutdown(): event.ignore(); return
         if self.bridge.closed:
+            if not self.auto.shutdown(): event.ignore(); return
             if not self._window_closed:
                 for signal,slot in self._bridge_slots: signal.disconnect(slot)
                 self.controller.state_changed.disconnect(self._state); self.controller.terminal.disconnect(self._terminal)
                 QApplication.instance().aboutToQuit.disconnect(self.controller.shutdown); self.clock.stop()
+                QApplication.instance().aboutToQuit.disconnect(self.auto.shutdown)
                 self._window_closed=True
             event.accept(); return
         event.ignore()
@@ -413,6 +421,7 @@ class MainWindow(QMainWindow):
             return
         active=self.bridge.run_active or (self.last_view and any(j.owned and j.state.value=="RUNNING" for j in self.last_view.jobs))
         if active and self._confirm_close()!="Pause and Close": return
+        if not self.auto.shutdown(): return
         self.archive_selected.setEnabled(False); self.queue_panel.start.setEnabled(False); self.bridge.begin_shutdown(True)
 
 

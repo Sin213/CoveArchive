@@ -337,3 +337,139 @@ def test_export_replaces_only_previous_exports(panel, tmp_path, monkeypatch, kin
         assert not calls and panel.status.text() == "Choose a new file name; only a previous CoveArchive export can be replaced"
         assert not t.is_export_file(target)
         assert {f: (f.read_bytes() if f.is_file() else None, f.lstat().st_mtime_ns) for f in root.iterdir()} == before and panel.library is memory
+@pytest.fixture
+def automatic_panel(tmp_path):
+    from types import SimpleNamespace as NS
+    from covearchive.ui.auto_archive import AutoArchive
+    from test_ui_auto_archive import Bridge, Scan
+    clock=[10000.]; scan=Scan(); bridge=Bridge(); store=LibraryStore(tmp_path/'auto-library.json')
+    assert store.save(m.Library().add_repository('https://github.com/o/r')) is None
+    settings=dict(archive_root=str(tmp_path/'archive'),repositories={'o/r':dict(include=[],exclude=[],extensions=['.zip'],prereleases=False)})
+    auto=AutoArchive(scan,bridge,lambda:value.library,lambda:settings,clock=lambda:clock[0],tick_ms=100000)
+    value=LibraryPanel(store,auto=auto); value.changed.connect(auto.sync); value.resize(1000,600); value.show(); auto.start()
+    yield NS(panel=value,auto=auto,clock=clock,scan=scan,bridge=bridge,settings=settings)
+    auto.shutdown(); value.close()
+
+
+def auto_dialog(monkeypatch,choice='Every 6 hours',answer=True):
+    calls=[]
+    monkeypatch.setattr(p.W.QInputDialog,'getItem',lambda *a:(calls.append(a) or choice,True))
+    monkeypatch.setattr(p.W.QMessageBox,'question',lambda *a:p.W.QMessageBox.Yes if answer else p.W.QMessageBox.No)
+    return calls
+
+
+def test_auto_columns_exist_before_opt_in(panel):
+    assert panel.model.columnCount()==6
+    assert panel.model.headerData(4,Qt.Horizontal)=='Auto-Archive'
+    panel._add(text='https://github.com/o/r'); select(panel,'github:o/r'); assert not panel.auto_button.isEnabled()
+
+
+def test_auto_enable_persists_arms_and_disables_without_queue_changes(automatic_panel,monkeypatch,tmp_path):
+    e=automatic_panel; v=e.panel; assert not v.auto_button.isEnabled(); select(v,'github:o/r')
+    assert v.auto_button.isEnabled(); calls=auto_dialog(monkeypatch); v.auto_button.click()
+    assert calls[0][3]==['Off','Every 1 hour','Every 6 hours','Every 12 hours','Every 24 hours'] and calls[0][4]==0
+    assert m.load_library(v.store.path.read_bytes()).repositories[0].auto_archive==6
+    assert e.auto.status('o/r').next_check==e.clock[0]+21600 and not e.scan.calls and not e.bridge.calls
+    archive=tmp_path/'old.zip'; archive.write_bytes(b'old archive')
+    select(v,'github:o/r'); calls=auto_dialog(monkeypatch,'Off')
+    monkeypatch.setattr(p.W.QMessageBox,'question',lambda *a:pytest.fail('disabling must not ask for consent'))
+    v.auto_button.click(); assert calls[0][4]==2 and archive.read_bytes()==b'old archive'
+    assert v.library.repositories[0].auto_archive is None and not e.bridge.calls
+    e.clock[0]+=100000; e.auto.tick(); assert not e.scan.calls
+    assert 'archives and queued downloads are unchanged' in v.status.text()
+    for widget in (v.auto_button,v.auto_detail): assert widget.accessibleName() and widget.accessibleDescription()
+    assert v.auto_detail.textFormat()==Qt.PlainText and v.auto_detail.wordWrap()
+
+
+@pytest.mark.parametrize('missing',['rules','root','no'])
+def test_auto_refusal_is_atomic(automatic_panel,monkeypatch,missing):
+    e=automatic_panel; v=e.panel; select(v,'github:o/r'); before=v.store.path.read_bytes()
+    if missing=='rules': e.settings['repositories'].clear()
+    elif missing=='root': e.settings['archive_root']=''
+    auto_dialog(monkeypatch,answer=missing!='no'); v.auto_button.click()
+    assert v.store.path.read_bytes()==before and v.library.repositories[0].auto_archive is None
+    if missing!='no': assert e.auto.problem(v.library.repositories[0]) in v.status.text()
+
+
+def test_auto_inactive_readonly_refresh_selection_detail_and_message(automatic_panel,monkeypatch):
+    e=automatic_panel; v=e.panel; assert v._transaction(lambda lib:lib.add_repository('https://host/g/r',provider='gitlab'))
+    select(v,'gitlab:host/g/r'); auto_dialog(monkeypatch); v.auto_button.click()
+    assert all(r.auto_archive is None for r in v.library.repositories) and 'active' in v.status.text().lower()
+    v.table.selectAll(); v.auto_button.click(); assert v.library.repositories[0].auto_archive==6
+    assert v.library.repositories[1].auto_archive is None and 'skipped' in v.status.text().lower()
+    select(v,'github:o/r'); selected=v._selected(); resets=[]; v.model.modelReset.connect(lambda:resets.append(1))
+    v.status.setText('User action'); e.auto.schedule.failed('o/r','not_found'); e.auto.changed.emit()
+    assert v._selected()==selected and not resets and v.status.text()=='User action'
+    assert 'URL' in v.auto_detail.text() and v.model.data(v.model.index(0,4))=='Error'
+    v.table.selectAll(); assert not v.auto_detail.text()
+    v.store.writable=False; v._lock(); assert not v.auto_button.isEnabled()
+
+
+def test_auto_add_bulk_import_and_readd_stay_off(automatic_panel,monkeypatch,tmp_path):
+    e=automatic_panel; v=e.panel; select(v,'github:o/r'); auto_dialog(monkeypatch); v.auto_button.click()
+    select(v,'github:o/r'); v.remove.click(); v._add(text='https://github.com/o/r')
+    monkeypatch.setattr(p.W.QInputDialog,'getMultiLineText',lambda *a:('https://github.com/o/s',True)); v.bulk.click()
+    path=tmp_path/'import.json'; path.write_bytes(encoded(git_sync_document(2)))
+    monkeypatch.setattr(p.W.QFileDialog,'getOpenFileName',lambda *a:(str(path),''))
+    monkeypatch.setattr(p.W.QMessageBox,'exec',lambda box:next(b for b in box.buttons() if b.text()=='Import').click() or 0)
+    v.import_button.click(); idle(v)
+    assert len(v.library.repositories)==4 and all(r.auto_archive is None for r in v.library.repositories)
+    assert not e.scan.calls and not e.bridge.calls
+
+
+@pytest.mark.parametrize('count',[1,2])
+def test_auto_status_pluralization(automatic_panel,monkeypatch,count):
+    e=automatic_panel; v=e.panel; noun='repository' if count==1 else 'repositories'
+    for i in range(1,count):
+        v._add(text=f'https://github.com/o/r{i}'); e.settings['repositories'][f'o/r{i}']=e.settings['repositories']['o/r'].copy()
+    auto_dialog(monkeypatch); v.table.selectAll(); v.auto_button.click()
+    assert v.status.text()==f'Auto-Archive on for {count} {noun} every 6 hours; first check in 6 hours'
+    auto_dialog(monkeypatch,'Off'); v.table.selectAll(); v.auto_button.click()
+    assert v.status.text()==f'Auto-Archive off for {count} {noun}; archives and queued downloads are unchanged'
+    for i in range(count): assert v._transaction(lambda lib,i=i:lib.add_repository(f'https://host/g/r{i}',provider='gitlab'))
+    auto_dialog(monkeypatch); v.table.selectAll(); v.auto_button.click()
+    assert v.status.text().endswith(f'; {count} inactive {noun} skipped')
+    v.search.setText('host/g'); v.table.selectAll(); v.auto_button.click()
+    assert v.status.text()==f'No active GitHub {noun} selected; {count} inactive {noun} skipped'
+
+
+@pytest.mark.parametrize('size',[(1180,720),(820,520)])
+def test_auto_columns_fit_and_full_tooltips(automatic_panel,size):
+    e=automatic_panel; v=e.panel; assert v._transaction(lambda lib:lib.set_auto_archive('github:o/r',6))
+    e.auto.schedule.succeeded('o/r',''); e.auto.changed.emit(); v.resize(*size); APP.processEvents()
+    for column in (4,5):
+        index=v.model.index(0,column); text=v.model.data(index)
+        assert v.table.columnWidth(column)>=v.table.fontMetrics().horizontalAdvance(text)
+        assert v.model.data(index,Qt.ToolTipRole)==text
+    select(v,'github:o/r'); e.auto.schedule.failed('o/r','not_found'); e.auto.changed.emit()
+    assert 'URL' in v.model.data(v.model.index(0,4),Qt.ToolTipRole)
+    assert v.auto_detail.text(); v.search.setText('absent'); assert not v.auto_detail.text()
+
+
+@pytest.mark.parametrize('missing',['rules','root'])
+def test_auto_refusal_names_repository_and_batch_count(automatic_panel,monkeypatch,missing):
+    e=automatic_panel; v=e.panel; v._add(text='https://github.com/o/s')
+    if missing=='root':
+        e.settings['repositories']['o/s']=e.settings['repositories']['o/r'].copy(); e.settings['archive_root']=''
+    v.table.selectAll(); auto_dialog(monkeypatch); before=v.store.path.read_bytes(); v.auto_button.click()
+    expected='o/s' if missing=='rules' else 'o/r'
+    assert expected in v.status.text() and ('1 of 2' if missing=='rules' else '2 of 2') in v.status.text()
+    assert v.store.path.read_bytes()==before
+
+
+def test_auto_consent_saved_folder_interval_and_singular_hours(automatic_panel,monkeypatch):
+    e=automatic_panel; v=e.panel; select(v,'github:o/r'); auto_dialog(monkeypatch,'Every 1 hour'); questions=[]
+    monkeypatch.setattr(p.W.QMessageBox,'question',lambda *a:questions.append(a) or p.W.QMessageBox.Yes)
+    v.auto_button.click(); text=questions[0][2]
+    for part in ('1 repository','1 hour',e.settings['archive_root'],'first check','automatically','disk space','bandwidth','never deleted'):
+        assert part in text
+    assert questions[0][-1]==p.W.QMessageBox.No
+    assert 'every 1 hour; first check in 1 hour' in v.status.text()
+    assert e.auto.summary(v.library.repositories[0])=='Every 1 hour'
+
+
+def test_existing_status_column_and_auto_columns_size_to_contents(panel):
+    header=panel.table.horizontalHeader()
+    assert [header.sectionResizeMode(i) for i in range(6)]==[
+        p.W.QHeaderView.Stretch,p.W.QHeaderView.Stretch,p.W.QHeaderView.Stretch,
+        p.W.QHeaderView.ResizeToContents,p.W.QHeaderView.ResizeToContents,p.W.QHeaderView.ResizeToContents]

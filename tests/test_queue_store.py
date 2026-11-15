@@ -347,3 +347,20 @@ def test_Q04_H1_root_aliases(db,roots):
 def test_Q10_H1_alias_project_claim(db,roots):
     db.enqueue(*item(1,root=roots[0])); db.enqueue(*item(2,root=roots[-1]))
     assert db.claim_next('first') is not None and db.claim_next('second') is None
+@pytest.mark.parametrize('state',list(S))
+def test_auto_archive_enqueue_preserves_every_existing_state(db,state):
+    job=db.enqueue(*item()).job
+    with sqlite3.connect(db.path) as c: c.execute('update jobs set state=? where job_id=?',(state.value,job.job_id))
+    before=db.get(job.job_id)
+    result=db.enqueue_many([item(),item()],requeue_completed=False)
+    assert all(r.outcome=='existing' and r.job==before for r in result)
+    assert db.list_jobs()==(before,)
+
+
+def test_auto_archive_enqueue_completed_manual_default_unchanged(db):
+    job=db.enqueue(*item()).job; db.claim_next('owner')
+    db.finish(job.job_id,'owner',S.COMPLETED,result=NS(status='ARCHIVED'),retry_count=3)
+    before=db.get(job.job_id)
+    assert db.enqueue_many([item()],requeue_completed=False)[0].job==before
+    result=db.enqueue_many([item()])[0]
+    assert result.outcome=='requeued' and result.job.state==S.QUEUED and result.job.retry_count==0
