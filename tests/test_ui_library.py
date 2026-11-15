@@ -4,7 +4,7 @@ import sys
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt, QTimer
-from threading import Event
+from threading import Event, current_thread
 from PySide6.QtTest import QTest
 import hashlib
 import sqlite3
@@ -162,10 +162,42 @@ def test_transaction_failures_readonly_export_and_files_preserved(panel, tmp_pat
 def test_scale_accessibility_and_layout(panel, tmp_path, monkeypatch):
     path = tmp_path / "import.json"; path.write_bytes(encoded(git_sync_document(5000)))
     monkeypatch.setattr(p.W.QMessageBox, "exec", lambda box: next(b for b in box.buttons() if b.text() == "Import").click() or 0)
-    ticks = [perf_counter()]; timer = QTimer(); timer.timeout.connect(lambda: ticks.append(perf_counter())); timer.start(5)
-    panel._import(); assert getattr(panel, "busy", False) and all(not w.isEnabled() for w in [*panel.mutating, panel.export_button])
-    idle(panel); timer.stop(); gap = max(b - a for a, b in zip(ticks, ticks[1:])) * 1000
-    print(f"5000-entry import: ticks={len(ticks)}, max gap={gap:.3f} ms"); assert len(ticks) > 2 and gap < 250 and panel.export_button.isEnabled()
+    gui_thread = current_thread(); threads = {}; gate = Event(); entered = Event()
+    read, build = p.t.read_import_file, p.t.build_plan
+    def worker_read(path):
+        threads["read"] = current_thread()
+        assert current_thread() is not gui_thread
+        entered.set()
+        assert gate.wait(10), "Import worker gate timed out"
+        return read(path)
+    def worker_build(*args):
+        threads["build"] = current_thread()
+        assert current_thread() is not gui_thread
+        return build(*args)
+    monkeypatch.setattr(p.t, "read_import_file", worker_read)
+    monkeypatch.setattr(p.t, "build_plan", worker_build)
+    ticks = []; timer = QTimer(); timer.setTimerType(Qt.PreciseTimer)
+    timer.timeout.connect(lambda: ticks.append(perf_counter()))
+    start = perf_counter(); timer.start(5)
+    try:
+        panel._import()
+        deadline = start + 5
+        while (len(ticks) < 6 or not entered.is_set()) and perf_counter() < deadline:
+            APP.processEvents(); QTest.qWait(1)
+        assert entered.is_set() and len(ticks) >= 6, "GUI heartbeat timed out while import worker was held"
+        assert panel.busy and not panel._future.done()
+        assert all(not w.isEnabled() for w in [*panel.mutating, panel.export_button])
+        gate.set(); idle(panel)
+        ticks.append(perf_counter())
+        gap = max(b - a for a, b in zip([start, *ticks], ticks)) * 1000
+        print(f"5000-entry import whole span: heartbeats={len(ticks) - 1}, max gap={gap:.3f} ms")
+        assert gap < 250
+    finally:
+        timer.stop(); gate.set()
+    assert set(threads) == {"read", "build"} and all(thread is not gui_thread for thread in threads.values())
+    assert panel.export_button.isEnabled()
+    monkeypatch.setattr(p.t, "read_import_file", read)
+    monkeypatch.setattr(p.t, "build_plan", build)
     panel.search.setText("repo4999"); assert panel.model.rowCount() == 1
     assert panel.table.indexWidget(panel.model.index(0, 0)) is None and panel.table.verticalHeader().isHidden()
     assert panel.sizeHint().width() <= 820 and panel.minimumSizeHint().height() <= 520

@@ -570,8 +570,10 @@ def test_c3_untrusted_url_errors_stay_typed(rig, late, kind, bad):
 
 @pytest.mark.parametrize("late", [False, True])
 @pytest.mark.parametrize("status", [200, 403])
-def test_c4_nested_json_is_typed(rig, late, status):
-    deep = b"[" * 10000 + b"]" * 10000
+@pytest.mark.parametrize("depth", [1500, 10000])
+@pytest.mark.parametrize("opening,closing", [(b"[", b"]"), (b'{"a":', b"}")])
+def test_c4_nested_json_is_typed(rig, late, status, depth, opening, closing):
+    deep = opening * depth + (b"" if opening == b"[" else b"0") + closing * depth
     script = ([FakeResponse(headers={"Link": link(page(2))})] if late else []) + [FakeResponse(status, deep)]
     client, _, _ = rig(script)
     cls, code = (InvalidResponseError, "invalid_json") if status == 200 else (AccessDeniedError, "forbidden")
@@ -580,6 +582,11 @@ def test_c4_nested_json_is_typed(rig, late, status):
     assert isinstance(root, cls) and root.code == code
     if late:
         assert exc.pages_completed == 1 and exc.__cause__ is root
+
+
+def test_modest_json_depth_loads(rig):
+    client, _, _ = rig([FakeResponse(body=[release()])])
+    assert len(discover(client).releases) == 1
 
 
 @pytest.mark.parametrize("field", ["X-RateLimit-Reset", "Retry-After", "X-RateLimit-Remaining"])

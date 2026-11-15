@@ -205,6 +205,19 @@ def test_bad_json(raw, code):
         assert exc.value.code == code
 
 
+@pytest.mark.parametrize("depth", [1500, 10000])
+@pytest.mark.parametrize("opening,closing", [(b"[", b"]"), (b'{"a":', b"}")])
+def test_json_nesting_bombs(depth, opening, closing):
+    test_bad_json(opening * depth + b"0" + closing * depth, "json")
+
+
+def test_modest_json_depth_loads():
+    raw = b'[' * 8 + b'0' + b']' * 8
+    assert m.strict_json_loads(raw) == json.loads(raw)
+    lib = m.Library(repositories=(m.Repository("github", "https://github.com/o/r"),))
+    assert m.load_library(m.dump_library(lib)) == lib
+
+
 @pytest.mark.parametrize("change", ["bool_version", "newer", "unknown", "collection_type", "repo_type",
     "parent", "cycle", "duplicate_id", "duplicate_identity", "bad_id", "repo_unknown", "collection_ref"])
 def test_bad_schema(change):

@@ -167,6 +167,19 @@ def test_M12_parser_malformed_duplicates_numbers_depth(text, code, load):
     rejected(lambda: load(text), code)
 
 
+@pytest.mark.parametrize("load", [m.loads_index, m.loads_release_manifest])
+@pytest.mark.parametrize("depth", [1500, 10000])
+@pytest.mark.parametrize("opening,closing", [("[", "]"), ('{"a":', "}")])
+def test_json_nesting_bombs(load, depth, opening, closing):
+    rejected(lambda: load(opening * depth + "0" + closing * depth), "limit")
+
+
+@pytest.mark.parametrize("release", [False, True])
+def test_modest_json_depth_loads(release):
+    load = m.loads_release_manifest if release else m.loads_index
+    assert load(json.dumps(document(release))) == (manifest() if release else m.ProjectIndex(REPO, (record(),)))
+
+
 @pytest.mark.parametrize("release", [False, True])
 def test_M13_strict_keys_identity_float_sizes_and_input_caps(release):
     load = m.loads_release_manifest if release else m.loads_index

@@ -175,6 +175,12 @@ def test_bad_json_is_a_plan_not_an_exception(raw, code):
     assert lib == m.Library()
 
 
+@pytest.mark.parametrize("depth", [1500, 10000])
+@pytest.mark.parametrize("opening,closing", [(b"[", b"]"), (b'{"a":', b"}")])
+def test_json_nesting_bombs(depth, opening, closing):
+    test_bad_json_is_a_plan_not_an_exception(opening * depth + b"0" + closing * depth, "json")
+
+
 def test_invalid_list_bounded_and_result_caps():
     plan = t.build_plan(encoded({"format": "Git-Sync data", "version": 1, "repos": [{"api": "github", "repository": "SECRET"}] * 70}), m.Library())
     assert not plan.valid and len(plan.invalid) == 50 and plan.invalid[0][0] == 1

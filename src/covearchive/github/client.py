@@ -11,6 +11,7 @@ from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 import requests
 
 from covearchive import __version__
+from covearchive.jsondepth import check_json_depth
 
 from .models import ReleaseCatalog, ReleaseSchemaError, parse_release
 from .urls import RepositoryTarget, ReleaseListTarget, ReleaseTagTarget, parse_github_url
@@ -284,7 +285,9 @@ def _redirect_url(location, current):
 def _json(body):
     def invalid_constant(value):
         raise ValueError("Non-finite JSON constant.")
-    return json.loads(body.decode("utf-8"), parse_constant=invalid_constant)
+    text = body.decode("utf-8")
+    check_json_depth(text)
+    return json.loads(text, parse_constant=invalid_constant)
 
 
 class GitHubReleaseClient:

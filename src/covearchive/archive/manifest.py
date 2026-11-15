@@ -16,6 +16,7 @@ import re
 from urllib.parse import quote
 
 from covearchive.github.models import Release
+from covearchive.jsondepth import check_json_depth
 from covearchive.github.urls import GitHubUrlError, RepositoryTarget, parse_github_url
 
 from .naming import RELEASE_FILENAME, is_release_folder, is_safe_component, name_key
@@ -278,6 +279,7 @@ def _parse(text, cap, keys):
     if len(text) > cap or len(text.encode("utf-8", "surrogatepass")) > cap:
         raise ManifestError("limit")
     try:
+        check_json_depth(text)
         data = json.loads(text, object_pairs_hook=_pairs, parse_constant=_constant)
     except ManifestError:
         raise

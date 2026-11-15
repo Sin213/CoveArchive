@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from covearchive.github.urls import GitHubUrlError, ReleaseTagTarget, parse_github_url
+from covearchive.jsondepth import check_json_depth
 
 MAX_BYTES = 8 * 1024 * 1024
 MAX_BULK_BYTES = 1024 * 1024
@@ -338,7 +339,9 @@ def strict_json_loads(raw):
     if len(raw) > MAX_BYTES:
         _fail("size")
     try:
-        return json.loads(raw.decode("utf-8-sig"), object_pairs_hook=_object, parse_constant=lambda _: _fail("nonfinite"))
+        text = raw.decode("utf-8-sig")
+        check_json_depth(text)
+        return json.loads(text, object_pairs_hook=_object, parse_constant=lambda _: _fail("nonfinite"))
     except LibraryError:
         raise
     except (ValueError, TypeError, RecursionError, OverflowError):
