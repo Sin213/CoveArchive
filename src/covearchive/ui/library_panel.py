@@ -2,7 +2,7 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from PySide6 import QtWidgets as W
-from PySide6.QtCore import QAbstractTableModel, Qt, QTimer, Signal
+from PySide6.QtCore import QAbstractTableModel, QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from covearchive.library import model as m, transfer as t
 from covearchive.ui.library_store import atomic_write
@@ -71,7 +71,8 @@ class LibraryPanel(W.QWidget):
         self.export_button = button("Export...", self._export, top, False)
         self.search = W.QLineEdit(); self.search.setClearButtonEnabled(True); self.search.setPlaceholderText("Search repositories"); layout.addWidget(self.search)
         body = W.QHBoxLayout(); layout.addLayout(body, 1)
-        left, right = W.QVBoxLayout(), W.QVBoxLayout(); body.addLayout(left, 1); body.addLayout(right, 2)
+        # Leave room for the identifying columns with wider native delegates.
+        left, right = W.QVBoxLayout(), W.QVBoxLayout(); body.addLayout(left, 3); body.addLayout(right, 7)
         self.tree = W.QTreeWidget(); self.tree.setHeaderHidden(True); left.addWidget(self.tree)
         folders = W.QHBoxLayout(); left.addLayout(folders)
         self.new = button("New", self._new, folders); self.rename_collection = button("Rename", self._rename_collection, folders)
@@ -81,7 +82,10 @@ class LibraryPanel(W.QWidget):
         self.table.setSelectionMode(W.QAbstractItemView.ExtendedSelection); self.table.verticalHeader().hide()
         self.table.verticalHeader().setSectionResizeMode(W.QHeaderView.Fixed); self.table.verticalHeader().setDefaultSectionSize(26)
         self.table.horizontalHeader().setSectionResizeMode(W.QHeaderView.Stretch); right.addWidget(self.table)
-        self.table.horizontalHeader().setMinimumSectionSize(84)
+        self.table.installEventFilter(self); self._column_floor()
+        # Size status columns from visible rows; scanning Qt's default 1000 rows
+        # on every layout/scrollbar change stalls the GUI after a large import.
+        self.table.horizontalHeader().setResizeContentsPrecision(0)
         for column in (3,4,5): self.table.horizontalHeader().setSectionResizeMode(column,W.QHeaderView.ResizeToContents)
         actions = W.QHBoxLayout(); right.addLayout(actions)
         self.move = button("Move to...", self._move, actions); self.rename = button("Rename...", self._rename, actions)
@@ -102,6 +106,18 @@ class LibraryPanel(W.QWidget):
         self.table.selectionModel().selectionChanged.connect(lambda *_: (self._lock(),self._show_auto_detail()))
         if self.auto is not None: self.auto.changed.connect(self._auto_changed)
         self.url.returnPressed.connect(self._add); self.refresh(); self._lock()
+
+    def _column_floor(self):
+        # Measure a typical owner/repository label with the table's actual
+        # style, including delegate margins and the gridline on this platform.
+        option = W.QStyleOptionViewItem(); self.table.initViewItemOption(option)
+        option.text = 'Fictional/Tool'; option.features |= W.QStyleOptionViewItem.HasDisplay
+        width = self.table.style().sizeFromContents(W.QStyle.CT_ItemViewItem, option, QSize(), self.table).width()
+        self.table.horizontalHeader().setMinimumSectionSize(max(84, width + int(self.table.showGrid())))
+
+    def eventFilter(self, watched, event):
+        if watched is self.table and event.type() == QEvent.FontChange: self._column_floor()
+        return super().eventFilter(watched, event)
 
     def _lock(self):
         self.setEnabled(not self.busy)

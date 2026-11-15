@@ -473,3 +473,16 @@ def test_existing_status_column_and_auto_columns_size_to_contents(panel):
     assert [header.sectionResizeMode(i) for i in range(6)]==[
         p.W.QHeaderView.Stretch,p.W.QHeaderView.Stretch,p.W.QHeaderView.Stretch,
         p.W.QHeaderView.ResizeToContents,p.W.QHeaderView.ResizeToContents,p.W.QHeaderView.ResizeToContents]
+
+
+@pytest.mark.parametrize('target', ['panel', 'table'])
+def test_identifying_column_floor_tracks_font_changes(panel, target):
+    panel._add(text='https://github.com/Fictional/Tool'); APP.processEvents()
+    assert panel.table.horizontalHeader().minimumSectionSize() >= panel.table.sizeHintForColumn(0)
+    widget = panel if target == 'panel' else panel.table
+    font = widget.font(); font.setPointSizeF(font.pointSizeF() * 1.5)
+    widget.setFont(font); APP.processEvents()
+    floor = panel.table.horizontalHeader().minimumSectionSize()
+    assert floor >= max(84, panel.table.fontMetrics().horizontalAdvance('Fictional/Tool') + 6)
+    assert all(floor >= panel.table.sizeHintForColumn(column) for column in (0, 1))
+    assert all(panel.table.columnWidth(column) >= floor for column in range(3))
