@@ -6,9 +6,11 @@ import sys
 import time
 import unicodedata
 
-from PySide6.QtCore import QAbstractItemModel, QModelIndex, Qt, QTimer
+from PySide6.QtCore import QAbstractItemModel, QModelIndex, Qt, QTimer, QSize
+from PySide6.QtGui import QKeySequence, QShortcut, QBrush, QColor, QPainter
+from covearchive.ui.theme import ThemeTracker, set_role, set_tone, current_tokens
 from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QLineEdit,
-    QHeaderView, QMainWindow, QProgressBar, QPushButton, QTreeView, QVBoxLayout, QWidget, QFileDialog, QTabWidget, QMessageBox)
+    QFrame, QSizePolicy, QHeaderView, QMainWindow, QProgressBar, QPushButton, QTreeView, QVBoxLayout, QWidget, QFileDialog, QTabWidget, QMessageBox)
 
 from covearchive.formats import FORMAT_LABELS, SUPPORTED_EXTENSIONS, DEFAULT_EXTENSIONS
 from covearchive.build_filters import BuildRules, BuildFilterError, parse_patterns, allowed
@@ -21,7 +23,7 @@ from covearchive.queue.store import default_queue_path, QueueError
 from covearchive.ui.branding import app_icon
 from covearchive.ui.archive_bridge import ArchiveBridge, EnqueueRequest, EnqueueItem
 from covearchive.github.select import select_releases
-from covearchive.github.urls import GitHubUrlError, ReleaseTagTarget, RepositoryTarget
+from covearchive.github.urls import GitHubUrlError, ReleaseTagTarget, ReleaseListTarget, RepositoryTarget
 from covearchive.providers import parse_repository_url, canonical_url, display_name
 from covearchive.scan_worker import ProtocolError, ScanFailure
 from covearchive.ui.scan_process import ScanController
@@ -29,7 +31,7 @@ from covearchive.ui.auto_archive import AutoArchive
 from covearchive.ui.git_history import HistoryController, ERRORS, STAGES, result_text
 
 
-from covearchive.ui.queue_panel import display, size_text, state_text, QueuePanel, _error
+from covearchive.ui.queue_panel import display, size_text, state_text, QueuePanel, _error, _safe, _safe_lines
 
 
 class ReleaseModel(QAbstractItemModel):
@@ -38,6 +40,7 @@ class ReleaseModel(QAbstractItemModel):
 
     def __init__(self, selection=None, parent=None, *, checked=None, rules=BuildRules()):
         super().__init__(parent)
+        self._theme_widget = parent
         self.rows = () if selection is None else selection.releases
         self.enabled = () if selection is None else selection.enabled_extensions
         self.checked = checked if checked is not None else set(); self.rules=rules
@@ -89,7 +92,7 @@ class ReleaseModel(QAbstractItemModel):
         if role == Qt.CheckStateRole and index.column()==0:
             keys=self._keys(index); count=len(keys & self.checked)
             return Qt.Checked if keys and count==len(keys) else Qt.PartiallyChecked if count else Qt.Unchecked
-        if role != Qt.DisplayRole: return None
+        if role not in (Qt.DisplayRole, Qt.ToolTipRole, Qt.ForegroundRole): return None
         if asset:
             status = ("External link, not archived" if asset.state == "external_link" else
                 "Not verifiable: needs exactly one package file with size and SHA-256" if asset.state == "unverifiable" else
@@ -97,9 +100,25 @@ class ReleaseModel(QAbstractItemModel):
                 "Unsupported format" if asset.supported_extension is None else
                 "Filtered out" if asset.supported_extension not in self.enabled else
                 "Eligible" if id(asset) in self.matches[root] else ("Excluded by filename rules" if not allowed(BuildRules((),self.rules.exclude),asset.name) else "Not matched by include rules") if id(asset) in self.base[root] else "Duplicate asset")
+            if role == Qt.ToolTipRole:
+                explanation = {
+                    "Eligible": "Can be selected for archiving with the current formats and filename rules.",
+                    "Filtered out": "Enable this format to make this uploaded asset eligible.",
+                    "Unsupported format": "This file type is not supported for archiving.",
+                    "Not uploaded": "The provider has not marked this asset as uploaded; it cannot be selected.",
+                    "External link, not archived": "External links are listed for reference and cannot be archived.",
+                    "Not verifiable: needs exactly one package file with size and SHA-256": "This package cannot be safely verified and cannot be selected.",
+                    "Excluded by filename rules": "An exclude pattern prevents this asset from being selected.",
+                    "Not matched by include rules": "This asset does not match any of the include patterns.",
+                    "Duplicate asset": "Another occurrence of this asset is already represented; this duplicate cannot be selected.",
+                }
+                return _safe(status + ": " + explanation[status])
+            if role == Qt.ForegroundRole:
+                return QBrush(QColor(current_tokens(self._theme_widget)['muted'])) if status != "Eligible" else None
             values = (asset.name, "", "",
                       asset.supported_extension or "-", size_text(asset.size), status)
         else:
+            if role != Qt.DisplayRole: return None
             values = (release.name or release.tag_name, release.tag_name, (release.published_at or "-")[:10],
                       "-", "-", f"{len(self.matches[root])} matching assets" if self.matches[root] else
                       "No assets" if not release.assets else "No matching assets")
@@ -107,7 +126,33 @@ class ReleaseModel(QAbstractItemModel):
         return display(values[index.column()])
 
 
-class OptionalLabel(QLabel):
+class ElidedLabel(QLabel):
+    """Keep full accessible text while containing long paths and diagnostics."""
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.setTextFormat(Qt.PlainText)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setToolTip(_safe_lines(self.text()))
+
+    def setText(self, text):
+        text="" if text is None else str(text)
+        super().setText(text)
+        self.setToolTip(_safe_lines(text))
+
+    def clear(self): self.setText("")
+    def heightForWidth(self,width): return self.sizeHint().height()
+
+    def sizeHint(self): return QSize(100, self.fontMetrics().height() + 2)
+    def minimumSizeHint(self): return QSize(0, self.fontMetrics().height() + 2)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        text = self.fontMetrics().elidedText(self.text().replace('\n', ' | '), Qt.ElideRight, self.width())
+        painter.drawText(self.rect(), Qt.AlignVCenter | Qt.AlignLeft, text)
+
+
+class OptionalLabel(ElidedLabel):
     def __init__(self,*args): super().__init__(*args); self.setVisible(bool(self.text()))
     def setText(self,text): super().setText(text); self.setVisible(bool(text))
     def clear(self): self.setText("")
@@ -128,13 +173,23 @@ class MainWindow(QMainWindow):
             lambda:self.library_panel.library,lambda:self.preferences.load()[0],clock=auto_clock,parent=self)
         self.enqueue_token=0; self.last_view=None; self._close_status=None; self._window_closed=False
         self.history_controller=HistoryController(self); self._history_closing=False; self._history_cancelling=False; self._history_pending=False
-        central = QWidget(); self.tabs=QTabWidget(); self.setCentralWidget(self.tabs); self.tabs.addTab(central,"Browse"); layout = QVBoxLayout(central); layout.setSpacing(4); layout.setContentsMargins(8,8,8,8)
-        layout.addWidget(QLabel("CoveArchive - part of the Cove Nexus family"))
-        row = QHBoxLayout(); layout.addLayout(row)
+        central = QWidget(); self.tabs=QTabWidget(); self.setCentralWidget(self.tabs); self.tabs.addTab(central,"Browse"); layout = QVBoxLayout(central); central.setObjectName("browsePage"); layout.setSpacing(3); layout.setContentsMargins(8,6,8,6)
+        brand = QHBoxLayout(); brand.setSpacing(8); layout.addLayout(brand)
+        icon = QLabel(); icon.setPixmap(app_icon().pixmap(24,24)); brand.addWidget(icon)
+        title = QLabel("CoveArchive - part of the Cove Nexus family"); title.setTextFormat(Qt.PlainText)
+        title.setObjectName("brandTitle"); brand.addWidget(title,1)
+        source = QFrame(); source.setProperty("section", "card"); layout.addWidget(source)
+        source_layout = QVBoxLayout(source); source_layout.setContentsMargins(6,4,6,4); source_layout.setSpacing(2)
+        row = QHBoxLayout(); row.setSpacing(4); source_layout.addLayout(row)
         self.url = QLineEdit(); self.url.setPlaceholderText("https://github.com/owner/repository/releases, codeberg.org/owner/repository or gitlab.com/group/project")
         self.scan = QPushButton("Scan"); self.cancel = QPushButton("Cancel Scan"); self.cancel.setEnabled(False)
         row.addWidget(self.url,1); row.addWidget(self.scan); row.addWidget(self.cancel)
-        filters = QHBoxLayout(); layout.addLayout(filters)
+        self.provider = QLabel("Unsupported"); self.provider.setTextFormat(Qt.PlainText)
+        self.provider.setObjectName("providerBadge"); self.provider.setAlignment(Qt.AlignCenter)
+        self.provider.setSizePolicy(QSizePolicy.Fixed,QSizePolicy.Fixed); self.provider.setWordWrap(False)
+        self.provider.setAccessibleName("Repository provider"); set_tone(self.provider, "muted"); row.addWidget(self.provider)
+        self.url.textChanged.connect(self._provider_changed); self._provider_changed()
+        filters = QHBoxLayout(); filters.setSpacing(2); source_layout.addLayout(filters)
         self.prereleases = QCheckBox("Include prereleases"); filters.addWidget(self.prereleases)
         self.formats = {}
         for extension in SUPPORTED_EXTENSIONS:
@@ -142,16 +197,18 @@ class MainWindow(QMainWindow):
             if extension not in DEFAULT_EXTENSIONS: box.setToolTip("archived only; never launched or installed")
             self.formats[extension] = box; filters.addWidget(box); box.toggled.connect(self._refresh)
         filters.addStretch()
-        rules_row=QHBoxLayout(); layout.addLayout(rules_row); self.include=QLineEdit(); self.exclude=QLineEdit(); self.save_rules=QPushButton("Save rules for this repository")
+        rules_card=QFrame(); rules_card.setProperty("section", "card"); layout.addWidget(rules_card)
+        rules_layout=QVBoxLayout(rules_card); rules_layout.setContentsMargins(6,4,6,4); rules_layout.setSpacing(2)
+        rules_row=QHBoxLayout(); rules_row.setSpacing(4); rules_layout.addLayout(rules_row); self.include=QLineEdit(); self.exclude=QLineEdit(); self.save_rules=QPushButton("Save rules for this repository")
         for name,edit in (("Include",self.include),("Exclude",self.exclude)): rules_row.addWidget(QLabel(name)); rules_row.addWidget(edit); edit.setPlaceholderText("*win64*, *windows*  (comma-separated; * ? [ ])"); edit.textChanged.connect(self._rules_changed)
         self.save_rules.setEnabled(False)
         rules_row.addWidget(self.save_rules); self.save_rules.clicked.connect(self._save_rules)
         self.rule_error=OptionalLabel(self.preference_problem or ""); self.preview=OptionalLabel(); self.held_back=OptionalLabel()
-        for label in (self.rule_error,self.preview,self.held_back): label.setTextFormat(Qt.PlainText); label.setWordWrap(True); layout.addWidget(label)
-        destination=QHBoxLayout(); layout.addLayout(destination); self.root=QLineEdit(self.settings["archive_root"] or ""); self.root.setPlaceholderText("Archive root folder"); self.browse=QPushButton("Browse..."); destination.addWidget(self.root,1); destination.addWidget(self.browse)
-        self.destination=QLabel(); self.destination.setTextFormat(Qt.PlainText); self.destination.setWordWrap(True); layout.addWidget(self.destination)
+        for label in (self.rule_error,self.preview,self.held_back): label.setTextFormat(Qt.PlainText); label.setWordWrap(True); rules_layout.addWidget(label)
+        destination=QHBoxLayout(); destination.setSpacing(4); rules_layout.addLayout(destination); self.root=QLineEdit(self.settings["archive_root"] or ""); self.root.setPlaceholderText("Archive root folder"); self.browse=QPushButton("Browse..."); destination.addWidget(self.root,1); destination.addWidget(self.browse)
+        self.destination=ElidedLabel(); self.destination.setTextFormat(Qt.PlainText); self.destination.setWordWrap(True); rules_layout.addWidget(self.destination)
         self.root.textChanged.connect(self._destination); self.root.returnPressed.connect(self._destination); self.browse.clicked.connect(self._browse)
-        selection_row=QHBoxLayout(); layout.addLayout(selection_row); self.select_matching=QPushButton("Select Matching"); self.clear_selection=QPushButton("Clear Selection"); self.archive_selected=QPushButton("Archive Selected (0)"); self.archive_selected.setEnabled(False)
+        selection_row=QHBoxLayout(); selection_row.setSpacing(4); layout.addLayout(selection_row); self.select_matching=QPushButton("Select Matching"); self.clear_selection=QPushButton("Clear Selection"); self.archive_selected=QPushButton("Archive Selected (0)"); self.archive_selected.setEnabled(False)
         for button in (self.select_matching,self.clear_selection,self.archive_selected): selection_row.addWidget(button)
         self.history_button=QPushButton("Archive Git History"); self.history_cancel=QPushButton("Cancel Git History")
         self.history_button.setEnabled(False); self.history_cancel.setEnabled(False)
@@ -169,16 +226,27 @@ class MainWindow(QMainWindow):
         for widget,name in ((self.include,"Include filename patterns"),(self.exclude,"Exclude filename patterns"),(self.root,"Archive root"),(self.browse,"Browse archive root"),(self.save_rules,"Save rules for this repository"),(self.select_matching,"Select Matching"),(self.clear_selection,"Clear Selection"),(self.archive_selected,"Archive Selected")):
             widget.setAccessibleName(name); widget.setAccessibleDescription(name)
         self.include.returnPressed.connect(self._rules_changed); self.exclude.returnPressed.connect(self._rules_changed)
-        self.summary = QLabel(); self.summary.setTextFormat(Qt.PlainText); layout.addWidget(self.summary)
+        self.summary = OptionalLabel(); self.summary.setTextFormat(Qt.PlainText)
         self.tree = QTreeView(); self.tree.setUniformRowHeights(True); self.tree.setWordWrap(False)
         self.tree.setMinimumHeight(140); self.tree.setTextElideMode(Qt.ElideRight); layout.addWidget(self.tree,1)
+        overlay = QVBoxLayout(self.tree.viewport()); overlay.setContentsMargins(12,12,12,12)
+        self.empty = QLabel("Choose a repository and select Scan.\nNothing is scanned automatically.")
+        self.empty.setTextFormat(Qt.PlainText); self.empty.setWordWrap(True); self.empty.setAlignment(Qt.AlignCenter)
+        self.empty.setAttribute(Qt.WA_TransparentForMouseEvents); set_tone(self.empty, "muted")
+        overlay.addWidget(self.empty)
         self._model(None)
+        footer = QFrame(); footer.setProperty("section", "card"); layout.addWidget(footer)
+        footer_layout = QVBoxLayout(footer); footer_layout.setContentsMargins(6,4,6,4); footer_layout.setSpacing(2)
+        footer_layout.addWidget(self.summary)
         self.detail = OptionalLabel(); self.detail.setTextFormat(Qt.PlainText); self.detail.setWordWrap(True)
-        self.detail.setMaximumHeight(96); layout.addWidget(self.detail)
-        self.status = QLabel("Ready"); self.status.setTextFormat(Qt.PlainText); self.status.setWordWrap(True)
-        layout.addWidget(self.status)
-        self.busy = QProgressBar(); self.busy.setRange(0,0); self.busy.setVisible(False); layout.addWidget(self.busy)
-        self.elapsed = QLabel(); self.elapsed.setTextFormat(Qt.PlainText); self.elapsed.hide(); layout.addWidget(self.elapsed)
+        self.detail.setMaximumHeight(96); footer_layout.addWidget(self.detail)
+        self.status = ElidedLabel("Ready"); self.status.setTextFormat(Qt.PlainText); self.status.setWordWrap(True)
+        status_row = QHBoxLayout(); status_row.setSpacing(6); footer_layout.addLayout(status_row); status_row.addWidget(self.status,3)
+        self.busy = QProgressBar(); self.busy.setRange(0,0); self.busy.setVisible(False); status_row.addWidget(self.busy,1)
+        self.elapsed = QLabel(); self.elapsed.setTextFormat(Qt.PlainText); self.elapsed.hide(); status_row.addWidget(self.elapsed)
+        for label, tone in ((self.rule_error,"error"),(self.preview,"muted"),(self.held_back,"warning"),
+                (self.history_status,"normal"),(self.summary,"muted"),(self.detail,"muted"),(self.destination,"muted")):
+            set_tone(label,tone)
         self.clock = QTimer(self); self.clock.setInterval(250); self.clock.timeout.connect(self._tick)
         controls = [self.url,self.scan,self.cancel,self.prereleases,*self.formats.values(),self.include,self.exclude,self.save_rules,self.root,self.browse,self.select_matching,self.clear_selection,self.archive_selected,self.history_button,self.history_cancel,self.tree]
         for widget,name in zip(controls[:4],("GitHub URL","Scan","Cancel Scan","Include prereleases")):
@@ -190,22 +258,27 @@ class MainWindow(QMainWindow):
         self.controller.state_changed.connect(self._state); self.controller.terminal.connect(self._terminal)
         QApplication.instance().aboutToQuit.connect(self.controller.shutdown)
         QApplication.instance().aboutToQuit.connect(self.auto.shutdown)
-        self.setStyleSheet("""
-            QWidget { background:#182125; color:#EDF4F4; font-size:13px; }
-            QLineEdit,QTreeView { background:#10191D; border:1px solid #53696D; padding:5px; }
-            QPushButton { padding:8px 15px; border:1px solid #50E6CF; }
-            QPushButton:disabled { color:#8B9B9E; border-color:#53696D; }
-            QLineEdit:focus,QPushButton:focus,QCheckBox:focus,QTreeView:focus { border:2px solid #50E6CF; }
-            QPushButton:focus { background:#285D59; }
-            QTreeView::item:selected { background:#285D59; }
-            QProgressBar::chunk { background:#50E6CF; }
-        """)
         self.queue_panel=QueuePanel(self.bridge,self); self.tabs.addTab(self.queue_panel,"Queue")
         self.library_store = library if library is not None else LibraryStore()
         self.library_panel = LibraryPanel(self.library_store, self, protected=self._protected_roots,auto=self.auto); self.tabs.addTab(self.library_panel, "Library")
         self.library_panel.changed.connect(self.auto.sync)
         self.tabs.tabBar().setAccessibleName("Browse, Queue and Library tabs"); self.tabs.setAccessibleName("Browse, Queue and Library"); self.tabs.setAccessibleDescription("Switch between build selection, archive queue and repository library")
         for previous,following in zip([self.tree,self.tabs,self.queue_panel.start,*self.queue_panel.buttons.values()],[self.tabs,self.queue_panel.start,*self.queue_panel.buttons.values(),self.queue_panel.table]): QWidget.setTabOrder(previous,following)
+        for button in (self.scan, self.archive_selected): set_role(button, "primary")
+        for button in (self.cancel, self.history_cancel): set_role(button, "danger")
+        self._theme = ThemeTracker(self)
+        self._navigation_shortcuts = []
+        for index in range(3):
+            shortcut = QShortcut(QKeySequence(f"Ctrl+{index + 1}"), self)
+            shortcut.setContext(Qt.WindowShortcut)
+            shortcut.activated.connect(lambda tab=index: self.tabs.setCurrentIndex(tab))
+            self._navigation_shortcuts.append(shortcut)
+            self.tabs.setTabToolTip(index, f"{self.tabs.tabText(index)} (Ctrl+{index + 1})")
+        shortcut = QShortcut(QKeySequence("Ctrl+L"), self)
+        shortcut.setContext(Qt.WindowShortcut)
+        shortcut.activated.connect(self._focus_source)
+        self._navigation_shortcuts.append(shortcut)
+        self.url.setToolTip("Repository URL (Ctrl+L)")
         self._bridge_slots=((self.bridge.enqueued,self._enqueued),(self.bridge.view_changed,self._queue_view),(self.bridge.shutdown_status,self._shutdown_status))
         for signal,slot in self._bridge_slots: signal.connect(slot,Qt.QueuedConnection)
         self.archive_selected.clicked.connect(self._archive); self.bridge.open()
@@ -213,6 +286,18 @@ class MainWindow(QMainWindow):
         self.url.setFocus()
         self.auto.start()
         self._history_enabled()
+
+    def _provider_changed(self):
+        try:
+            target=parse_repository_url(self.url.text())
+            provider=display_name(target.provider) if isinstance(target,(RepositoryTarget,ReleaseListTarget)) else "Unsupported"
+        except (GitHubUrlError, TypeError, ProtocolError): provider="Unsupported"
+        self.provider.setText(provider); self.provider.setVisible(bool(self.url.text().strip()))
+        set_tone(self.provider,"muted" if provider=="Unsupported" else "normal")
+
+    def _focus_source(self):
+        self.tabs.setCurrentIndex(0)
+        self.url.setFocus()
 
     def _history_enabled(self):
         try: validate_root(self.root.text()); valid=True
@@ -226,7 +311,7 @@ class MainWindow(QMainWindow):
         if not self.history_button.isEnabled(): return
         self._history_cancelling=False
         if self.history_controller.start(self.catalog.repository,str(Path(self.root.text()))):
-            self._history_pending=True; self.history_status.setText("Archiving Git history..."); self._history_enabled()
+            self._history_pending=True; set_tone(self.history_status,"normal"); self.history_status.setText("Archiving Git history..."); self._history_enabled()
 
     def _cancel_history(self):
         self._history_cancelling=True; self.history_controller.cancel()
@@ -236,9 +321,10 @@ class MainWindow(QMainWindow):
         if not self._history_closing and not self._history_cancelling: self.history_status.setText(STAGES.get(stage,"Archiving Git history..."))
 
     def _history_finished(self,result):
-        self.history_status.setText(result_text(result)); self._history_terminal()
+        set_tone(self.history_status,"success"); self.history_status.setText(result_text(result)); self._history_terminal()
 
     def _history_failed(self,error):
+        set_tone(self.history_status,"error")
         text=ERRORS.get(error.code,ERRORS["internal_error"])
         self.history_status.setText(text if text.startswith("Git history") else "Git history: "+text); self._history_terminal()
 
@@ -254,6 +340,8 @@ class MainWindow(QMainWindow):
         return [queue_dir, self.root.text(), self.settings["archive_root"]]
 
     def _model(self, selection):
+        if selection is None: self.empty.setText("Choose a repository and select Scan.\nNothing is scanned automatically.")
+        self.empty.setVisible(selection is None)
         old = self.tree.model(); model = ReleaseModel(selection,self.tree,checked=self.checked,rules=self.rules); self.tree.setModel(model)
         model.layoutChanged.connect(self._selection_changed)
         if old is not None: old.deleteLater()
@@ -279,7 +367,7 @@ class MainWindow(QMainWindow):
         self.detail.setText(text)
 
     def _status(self, text, error=False):
-        self.status.setText(text); self.status.setStyleSheet("color:"+("#FFB0A6" if error else "#50E6CF"))
+        self.status.setText(text); set_tone(self.status, "error" if error else "success" if text == "Completed" else "normal")
 
     def _clear(self):
         self.catalog=None
@@ -310,6 +398,7 @@ class MainWindow(QMainWindow):
         self.busy.setVisible(running); self.elapsed.setVisible(running)
         if running: self.clock.start(); self._tick(); self.cancel.setFocus()
         else: self.clock.stop()
+        self.empty.hide()
         self._status("Scanning" if running else "Cancelling" if state == "STOPPING" else
                      "Cancelling: stop is taking longer than expected")
 
@@ -375,6 +464,8 @@ class MainWindow(QMainWindow):
         text = ("No formats selected" if not enabled else "No releases found" if not self.catalog.releases else
                 f"{hidden} prereleases hidden" if not selection.releases and hidden else
                 "No matching assets" if not count else "Completed")
+        self.empty.setText(text)
+        self.empty.setVisible(self.tree.model().rowCount()==0 and self.active_id is None)
         self._status(text)
 
     def _rules_changed(self):
@@ -467,7 +558,7 @@ class MainWindow(QMainWindow):
         text=(f"Still active: {count} job(s) remain; the window will close when they finish" if status.phase=="timeout_waiting" else f"Stopping: waiting for {count} job(s) (catalog discovery and final file operations cannot be interrupted)")
         if status.phase=="timeout_waiting" and not count: text="Finishing up...; the window will close automatically when done"
         if not status.intent_saved: text+="; Warning: stop intent not persisted; incomplete jobs may be queued on restart"
-        self._status(text); self.queue_panel.message.setText(text); self.archive_selected.setEnabled(False); self.queue_panel.start.setEnabled(False)
+        self._status(text); self.queue_panel._message(text); set_tone(self.queue_panel.message,"warning" if not status.intent_saved else "normal"); self.archive_selected.setEnabled(False); self.queue_panel.start.setEnabled(False)
         if status.phase=="done":
             self.settings["window"]=dict(width=self.width(),height=self.height(),tab="queue" if self.tabs.currentIndex() == 1 else "browse")
             if self.preferences.writable: self.preferences.save(self.settings)
@@ -487,6 +578,7 @@ class MainWindow(QMainWindow):
                 self.controller.state_changed.disconnect(self._state); self.controller.terminal.disconnect(self._terminal)
                 QApplication.instance().aboutToQuit.disconnect(self.controller.shutdown); self.clock.stop()
                 QApplication.instance().aboutToQuit.disconnect(self.auto.shutdown)
+                self._theme.disconnect()
                 self._window_closed=True
             event.accept(); return
         event.ignore()

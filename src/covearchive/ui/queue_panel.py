@@ -2,10 +2,12 @@
 import re
 import time
 import unicodedata
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, Slot, QEvent
+from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView)
+    QFrame, QSizePolicy, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView)
 from covearchive.queue.models import JobState as S, safe_code
+from covearchive.ui.theme import set_role, set_tone, current_tokens
 
 def display(text, limit=8192):
     text = str(text)
@@ -40,6 +42,12 @@ def _safe(text):
     text = str(text)
     if re.search(r"://|[?&](?:sig|token|se|sp|sv|sr|X-Amz-[A-Za-z-]+)=",text,re.I): return "[redacted]"
     return display(text).replace("<", "\\u003c").replace(">", "\\u003e")
+
+def _safe_lines(text):
+    text = str(text)
+    if re.search(r"://|[?&](?:sig|token|se|sp|sv|sr|X-Amz-[A-Za-z-]+)=",text,re.I): return "[redacted]"
+    return "\n".join(display(line).replace("<", "\\u003c").replace(">", "\\u003e") for line in text.split("\n"))
+
 
 def _error(code): return _ERRORS.get(code, "Error code: " + safe_code(code)) if code else ""
 
@@ -80,14 +88,22 @@ def state_text(state): return "Waiting to retry" if state==S.RETRY_WAIT else sta
 class QueuePanel(QWidget):
     def __init__(self, bridge, parent=None):
         super().__init__(parent); self.bridge=bridge; self.view=None; self.seq=-1; self.token=0; self.waiting=set(); self.ack={}
-        layout=QVBoxLayout(self); row=QHBoxLayout(); layout.addLayout(row)
+        self.setObjectName("queuePage")
+        layout=QVBoxLayout(self); layout.setContentsMargins(8,6,8,6); layout.setSpacing(5)
+        toolbar=QFrame(); toolbar.setProperty("section", "card"); layout.addWidget(toolbar)
+        row=QHBoxLayout(toolbar); row.setContentsMargins(6,4,6,4); row.setSpacing(5)
         self.start=QPushButton("Start Queue"); self.buttons={a:QPushButton(a.title()) for a in ("pause","resume","cancel","retry")}
         for button in [self.start,*self.buttons.values()]:
             row.addWidget(button); button.setAccessibleName(button.text()); button.setAccessibleDescription(button.text()+" for selected queue jobs")
+        for button in self.buttons.values(): set_role(button, "secondary")
+        set_role(self.start, "primary"); set_role(self.buttons["cancel"], "danger")
         self.start.setAccessibleDescription("Start all pending queue jobs"); self.start.clicked.connect(self._start)
         for action,button in self.buttons.items(): button.clicked.connect(lambda checked=False,a=action:self._control(a))
         self.banner=QLabel("Loading queue"); self.summary=QLabel(); self.message=QLabel()
         for label in (self.banner,self.summary,self.message): label.setTextFormat(Qt.PlainText); label.setWordWrap(True); layout.addWidget(label)
+        self.banner.setProperty("notice", True); set_tone(self.banner,"warning")
+        self.banner.setAccessibleName("Queue notice")
+        set_tone(self.summary,"muted"); set_tone(self.message,"normal")
         self.table=QTableWidget(0,6); self.table.setHorizontalHeaderLabels(("File","Repository / release","Status","Progress (bytes)","Speed / ETA","Detail/error"))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setSelectionMode(QAbstractItemView.ExtendedSelection); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setTextElideMode(Qt.ElideRight); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive); self.table.horizontalHeader().setStretchLastSection(False)
@@ -102,8 +118,14 @@ class QueuePanel(QWidget):
                         header.fontMetrics().horizontalAdvance(self.table.horizontalHeaderItem(column).text()))
             self.table.setColumnWidth(column,width+24)
         self.table.setAccessibleName("Archive queue"); self.table.setAccessibleDescription("Select one or more jobs to control"); layout.addWidget(self.table,1)
-        self.table.itemSelectionChanged.connect(self._enabled); self.table.setStyleSheet("QTableWidget:focus { border:2px solid #50E6CF; } QTableWidget::item:selected { background:#285D59; }")
-        help_label=QLabel("Completed = result recorded when the job finished; files are re-verified only when queued again.\nSelect a job to enable Pause, Resume, Cancel or Retry. Fix the cause of a failure, then Retry.\nResume restarts an incomplete file from the beginning (no byte-level resume)."); help_label.setTextFormat(Qt.PlainText); help_label.setWordWrap(True); layout.addWidget(help_label)
+        self.table.setMinimumHeight(140)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        overlay=QVBoxLayout(self.table.viewport()); overlay.setContentsMargins(16,12,16,12)
+        self.empty=QLabel("Select assets in Browse and choose Archive Selected.\nNothing starts automatically.")
+        self.empty.setTextFormat(Qt.PlainText); self.empty.setWordWrap(True); self.empty.setAlignment(Qt.AlignCenter)
+        self.empty.setAttribute(Qt.WA_TransparentForMouseEvents); set_tone(self.empty,"muted"); overlay.addWidget(self.empty)
+        self.table.itemSelectionChanged.connect(self._enabled)
+        help_label=QLabel("Completed = result recorded when the job finished; files are re-verified only when queued again.\nSelect a job to enable Pause, Resume, Cancel or Retry. Fix the cause of a failure, then Retry.\nResume restarts an incomplete file from the beginning (no byte-level resume)."); help_label.setTextFormat(Qt.PlainText); help_label.setWordWrap(True); help_label.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Preferred); set_tone(help_label,"muted"); layout.addWidget(help_label)
         for signal,slot in ((bridge.view_changed,self._view),(bridge.control_finished,self._result),(bridge.run_event,self._run)): signal.connect(slot,Qt.QueuedConnection)
         self.results=[]
         self.failed=False
@@ -123,30 +145,65 @@ class QueuePanel(QWidget):
     @Slot(object)
     def _view(self, view):
         if view.seq < self.seq: return
-        if not self.failed and self.ack and any(self.ack.get(j.job_id)!=(j.state,j.stop_pending) for j in view.jobs if j.job_id in self.ack): self.message.clear(); self.ack.clear()
+        if not self.failed and self.ack and any(self.ack.get(j.job_id)!=(j.state,j.stop_pending) for j in view.jobs if j.job_id in self.ack): self._message(""); self.ack.clear()
         selected=set(self.selected_ids()); self.seq=view.seq; self.view=view; self.table.blockSignals(True); self.table.clearSelection(); self.table.setRowCount(len(view.jobs))
-        for row,job in enumerate(view.jobs):
+        finished=(S.COMPLETED,S.FAILED,S.CANCELLED)
+        pending=tuple(j for j in view.jobs if j.state not in finished)
+        done=tuple(j for j in view.jobs if j.state in finished)
+        for row,job in enumerate((*pending,*done)):
+            marker="Finished" if job.state in finished else "Pending"
+            self.table.setVerticalHeaderItem(row,QTableWidgetItem(marker))
             values=(job.asset_name,job.repository+" / "+job.tag,status_text(job,time.time()),progress_text(job),speed_eta_text(job),detail_text(job))
             for column,text in enumerate(values):
-                cell=QTableWidgetItem(_safe(text)); cell.setToolTip(_safe(text)+("\n"+_HISTORY if job.state==S.COMPLETED else "")); cell.setData(Qt.UserRole,job.job_id); self.table.setItem(row,column,cell)
+                cell=QTableWidgetItem(_safe(text)); cell.setToolTip(_safe(text)+("\n"+_HISTORY if job.state==S.COMPLETED else "")); cell.setData(Qt.UserRole,job.job_id); cell.setData(Qt.UserRole+1,job.state.value); self.table.setItem(row,column,cell)
             if job.job_id in selected:
                 for column in range(6): self.table.item(row,column).setSelected(True)
         self.table.blockSignals(False)
+        self.empty.setText("Queue unavailable." if view.problem or not view.usable else
+                           "Select assets in Browse and choose Archive Selected.\nNothing starts automatically.")
+        self.empty.setVisible(not view.jobs); self._style_rows()
         self.banner.setText(_safe(view.problem) if view.problem else ("GitHub rate limited until "+time.strftime("%H:%M:%S",time.localtime(view.cooldown_until))+"; retries wait automatically" if view.cooldown_until else ""))
-        self.summary.setText(" | ".join(state_text(s)+" "+str(n) for s,n in view.counts if n)+" | "+(size_text(view.bytes_done) if view.bytes_done is not None else "unknown")+" / "+(size_text(view.bytes_total) if view.bytes_total is not None else "unknown")); self._enabled()
+        self.banner.setVisible(bool(self.banner.text()))
+        self.banner.setToolTip(_safe(self.banner.text()))
+        set_tone(self.banner,"error" if view.problem else "warning")
+        counts=" | ".join(state_text(s)+" "+str(n) for s,n in view.counts if n)
+        self.summary.setText((counts+" | " if counts else "")+(size_text(view.bytes_done) if view.bytes_done is not None else "unknown")+" / "+(size_text(view.bytes_total) if view.bytes_total is not None else "unknown")); self._enabled()
+
+    def changeEvent(self,event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.PaletteChange,QEvent.StyleChange) and hasattr(self,'table'):
+            self._style_rows()
+
+    def _style_rows(self):
+        tokens=current_tokens(self)
+        tones={S.RUNNING:'accent',S.RETRY_WAIT:'warning',S.PAUSED:'warning',
+               S.FAILED:'danger',S.COMPLETED:'success',S.CANCELLED:'muted',S.QUEUED:'text'}
+        for row in range(self.table.rowCount()):
+            first=self.table.item(row,0)
+            if first is None: continue
+            state=S(first.data(Qt.UserRole+1))
+            finished=state in (S.COMPLETED,S.FAILED,S.CANCELLED)
+            for column in range(6):
+                cell=self.table.item(row,column)
+                cell.setBackground(QBrush(QColor(tokens['surface' if finished else 'card'])))
+                cell.setForeground(QBrush(QColor(tokens[tones[state] if column==2 else 'text'])))
+                font=cell.font(); font.setBold(column==2 and state==S.RUNNING); cell.setFont(font)
+
+    def _message(self,text):
+        text=_safe(text); self.message.setText(text); self.message.setToolTip(text)
 
     def _start(self):
         self.failed=False
         self.ack.clear()
-        if self.start.isEnabled(): self.bridge.start_queue(); self.message.setText("Starting queue...")
-        else: self.message.setText("Nothing to run")
+        if self.start.isEnabled(): self.bridge.start_queue(); self._message("Starting queue...")
+        else: self._message("Nothing to run")
 
     def _control(self, action):
         if not self.buttons[action].isEnabled(): return
         self.results=[]
         self.failed=False
         self.ack.clear()
-        self.message.clear()
+        self._message("")
         self.token+=1; ids=self.selected_ids(); self.waiting=set(ids); self._enabled(); self.bridge.control(self.token,action,ids)
 
     @Slot(object)
@@ -166,10 +223,12 @@ class QueuePanel(QWidget):
         text=f"{result.action.title()}: {succeeded} succeeded, {len(self.results)-succeeded} failed - "+"; ".join(sorted(t for _,t in self.results))
         if result.started: text+="; queue started"
         if result.deferred_pending: text+=f"; {result.deferred_pending} earlier queued job(s) are also waiting - press Start Queue to run all"
-        self.message.setText(_safe(text)); self._enabled()
+        set_tone(self.message,"error" if self.failed else "normal")
+        self._message(text); self._enabled()
 
     @Slot(object)
     def _run(self, event):
         if self.failed: return
         self.ack.clear()
-        self.message.setText({"started":"Queue started", "finished":"Queue run finished", "blocked":"Another CoveArchive process owns the queue lock", "error":"Queue run failed: "+_error(event.code)}.get(event.kind,"Queue updated"))
+        set_tone(self.message,"error" if event.kind=="error" else "warning" if event.kind=="blocked" else "normal")
+        self._message({"started":"Queue started", "finished":"Queue run finished", "blocked":"Another CoveArchive process owns the queue lock", "error":"Queue run failed: "+_error(event.code)}.get(event.kind,"Queue updated"))

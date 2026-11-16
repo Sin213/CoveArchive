@@ -3,10 +3,12 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from PySide6 import QtWidgets as W
 from PySide6.QtCore import QAbstractTableModel, QEvent, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QKeySequence, QShortcut, QBrush, QColor
 from covearchive.library import model as m, transfer as t
 from covearchive.ui.library_store import atomic_write
 from covearchive.auto_archive import NEEDS_RULES
+from covearchive.ui.theme import set_role, set_tone, current_tokens
+from covearchive.ui.queue_panel import _safe, _safe_lines
 
 
 def reason(code):
@@ -25,12 +27,16 @@ class RepositoryModel(QAbstractTableModel):
     def rowCount(self, parent=None): return 0 if parent is not None and parent.isValid() else len(self.rows)
     def columnCount(self, parent=None): return 6
     def data(self, index, role=Qt.DisplayRole):
+        if index.isValid() and role == Qt.ForegroundRole:
+            return None if self.rows[index.row()].active else QBrush(QColor(current_tokens(self.parent())['muted']))
+        if index.isValid() and index.column() == 0 and role == Qt.ToolTipRole:
+            return _safe(self.rows[index.row()].display_name)
         if index.isValid() and index.column()>=4 and role in (Qt.DisplayRole,Qt.ToolTipRole):
             repo=self.rows[index.row()]; auto=self.parent().auto
             text=(auto.summary(repo) if auto else 'Off') if index.column()==4 else (auto.schedule_text(repo) if auto else 'Last - / Next -')
             status=auto.status(repo.ref) if auto else None
             if role==Qt.ToolTipRole and index.column()==4 and status and status.message: text+='\n'+status.message
-            return text
+            return _safe_lines(text) if role==Qt.ToolTipRole else text
         if index.isValid() and role == Qt.DisplayRole:
             return self.labels[index.row()][index.column()]
         if index.isValid() and index.column() == 1 and role == Qt.ToolTipRole: return self.rows[index.row()].url
@@ -58,26 +64,39 @@ class LibraryPanel(W.QWidget):
         self.busy = self._closed = False; self._worker = ThreadPoolExecutor(max_workers=1)
         self._poll = QTimer(self); self._poll.setInterval(25); self._poll.timeout.connect(self._finish_import)
         self.destroyed.connect(lambda *_, worker=self._worker: worker.shutdown(wait=False, cancel_futures=True))
-        layout = W.QVBoxLayout(self); top = W.QHBoxLayout(); layout.addLayout(top)
+        self.setObjectName("libraryPage")
+        layout = W.QVBoxLayout(self); layout.setContentsMargins(8,6,8,6); layout.setSpacing(5)
+        toolbar=W.QFrame(); toolbar.setProperty("section","card"); layout.addWidget(toolbar)
+        toolbar_layout=W.QVBoxLayout(toolbar); toolbar_layout.setContentsMargins(6,4,6,4); toolbar_layout.setSpacing(4)
+        top = W.QHBoxLayout(); top.setSpacing(4); toolbar_layout.addLayout(top)
         self.url = W.QLineEdit(); self.url.setPlaceholderText("GitHub repository URL"); top.addWidget(self.url, 1)
         self.mutating = []
         def button(text, callback, row, mutate=True):
-            value = W.QPushButton(text); value.clicked.connect(callback); row.addWidget(value)
+            value = W.QPushButton(text); value.clicked.connect(callback)
+            if isinstance(row,W.QGridLayout): row.addWidget(value,row.count()//2,row.count()%2)
+            else: row.addWidget(value)
             if mutate: self.mutating.append(value)
             return value
         self.add = button("Add", self._add, top)
         self.bulk = button("Bulk Add...", self._bulk, top)
         self.import_button = button("Import...", self._import, top)
         self.export_button = button("Export...", self._export, top, False)
-        self.search = W.QLineEdit(); self.search.setClearButtonEnabled(True); self.search.setPlaceholderText("Search repositories"); layout.addWidget(self.search)
+        set_role(self.add,"primary")
+        self.search = W.QLineEdit(); self.search.setClearButtonEnabled(True); self.search.setPlaceholderText("Search repositories"); toolbar_layout.addWidget(self.search)
         body = W.QHBoxLayout(); layout.addLayout(body, 1)
         # Leave room for the identifying columns with wider native delegates.
-        left, right = W.QVBoxLayout(), W.QVBoxLayout(); body.addLayout(left, 3); body.addLayout(right, 7)
-        self.tree = W.QTreeWidget(); self.tree.setHeaderHidden(True); left.addWidget(self.tree)
+        left_card,right_card=W.QFrame(),W.QFrame()
+        for card in (left_card,right_card): card.setProperty("section","card")
+        body.addWidget(left_card,2); body.addWidget(right_card,8)
+        left, right = W.QVBoxLayout(left_card), W.QVBoxLayout(right_card)
+        for pane,heading in ((left,"Collections"),(right,"Repositories")):
+            pane.setContentsMargins(2,4,2,4); pane.setSpacing(4)
+            label=W.QLabel(heading); label.setTextFormat(Qt.PlainText); label.setProperty("heading",True); pane.addWidget(label)
+        self.tree = W.QTreeWidget(); self.tree.setHeaderHidden(True); self.tree.setMinimumHeight(140); left.addWidget(self.tree)
         folders = W.QHBoxLayout(); left.addLayout(folders)
         self.new = button("New", self._new, folders); self.rename_collection = button("Rename", self._rename_collection, folders)
         self.delete = button("Delete", self._delete, folders)
-        self.table = W.QTableView(); self.model = RepositoryModel(self); self.model.rows = (); self.model.labels = []
+        self.table = W.QTableView(); self.table.setObjectName("repositoryTable"); self.table.setMinimumHeight(140); self.table.setTextElideMode(Qt.ElideRight); self.model = RepositoryModel(self); self.model.rows = (); self.model.labels = []
         self.table.setModel(self.model); self.table.setSelectionBehavior(W.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(W.QAbstractItemView.ExtendedSelection); self.table.verticalHeader().hide()
         self.table.verticalHeader().setSectionResizeMode(W.QHeaderView.Fixed); self.table.verticalHeader().setDefaultSectionSize(26)
@@ -87,12 +106,24 @@ class LibraryPanel(W.QWidget):
         # on every layout/scrollbar change stalls the GUI after a large import.
         self.table.horizontalHeader().setResizeContentsPrecision(0)
         for column in (3,4,5): self.table.horizontalHeader().setSectionResizeMode(column,W.QHeaderView.ResizeToContents)
-        actions = W.QHBoxLayout(); right.addLayout(actions)
+        overlay=W.QVBoxLayout(self.table.viewport()); overlay.setContentsMargins(10,10,10,10)
+        self.empty=W.QLabel(); self.empty.setTextFormat(Qt.PlainText); self.empty.setWordWrap(True)
+        self.empty.setAlignment(Qt.AlignCenter); self.empty.setAttribute(Qt.WA_TransparentForMouseEvents)
+        set_tone(self.empty,"muted"); overlay.addWidget(self.empty)
+        # Two rows keep all actions readable beside the Collections pane.
+        actions = W.QGridLayout(); actions.setSpacing(4); right.addLayout(actions)
         self.move = button("Move to...", self._move, actions); self.rename = button("Rename...", self._rename, actions)
         self.remove = button("Remove from list...", self._remove, actions)
         self.auto_button=button('Auto-Archive...',self._auto_archive,actions)
-        self.auto_detail=W.QLabel(); self.auto_detail.setTextFormat(Qt.PlainText); self.auto_detail.setWordWrap(True); layout.addWidget(self.auto_detail)
+        for value in (self.delete, self.remove): set_role(value, 'danger')
+        auto_frame=W.QFrame(); auto_frame.setFrameShape(W.QFrame.StyledPanel); auto_frame.setProperty("section","card"); layout.addWidget(auto_frame)
+        auto_layout=W.QVBoxLayout(auto_frame); auto_layout.setContentsMargins(7,4,7,4); auto_layout.setSpacing(0)
+        self.auto_detail=W.QLabel(); self.auto_detail.setTextFormat(Qt.PlainText); self.auto_detail.setWordWrap(True); auto_layout.addWidget(self.auto_detail)
+        self.auto_placeholder=W.QLabel("Select a repository to see Auto-Archive details.")
+        self.auto_placeholder.setTextFormat(Qt.PlainText); set_tone(self.auto_placeholder,"muted"); auto_layout.addWidget(self.auto_placeholder)
         self.status = W.QLabel(); self.status.setTextFormat(Qt.PlainText); self.status.setWordWrap(True); layout.addWidget(self.status)
+        for label in (self.status,self.auto_detail): label.setSizePolicy(W.QSizePolicy.Ignored,W.QSizePolicy.Preferred)
+        set_tone(self.status,"muted")
         controls = [self.url, self.add, self.bulk, self.import_button, self.export_button, self.search, self.tree,
             self.new, self.rename_collection, self.delete, self.table, self.move, self.rename, self.remove, self.auto_button,self.auto_detail,self.status]
         for widget, name in zip(controls, ["Repository URL", "Add repository", "Bulk add", "Import library", "Export library",
@@ -119,29 +150,49 @@ class LibraryPanel(W.QWidget):
         if watched is self.table and event.type() == QEvent.FontChange: self._column_floor()
         return super().eventFilter(watched, event)
 
+    def changeEvent(self,event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.PaletteChange,QEvent.StyleChange) and hasattr(self,'model') and self.model.rows:
+            self.model.dataChanged.emit(self.model.index(0,0),self.model.index(len(self.model.rows)-1,5),[Qt.ForegroundRole])
+
+    def _status(self,text,tone="muted"):
+        self.status.setText(_safe_lines(text)); set_tone(self.status,tone)
+
+    def _empty_state(self):
+        if self.model.rows:
+            self.empty.hide(); return
+        text=(self.store.problem or "Library is read-only.") if not self.store.writable else (
+            "No repositories match the search." if self.search.text().strip() else
+            "No repositories yet. Add a repository by URL or Import a library." if not self.library.repositories else
+            "No repositories in this collection. Add by URL or Import a library.")
+        self.empty.setText(_safe_lines(text)); self.empty.show()
+        set_tone(self.empty,"error" if not self.store.writable else "muted")
+
     def _lock(self):
         self.setEnabled(not self.busy)
         for widget in [self.url, self.export_button, *self.mutating]: widget.setEnabled(self.store.writable)
-        if not self.store.writable: self.status.setText(self.store.problem or "Library is read-only.")
+        if not self.store.writable: self._status(self.store.problem or "Library is read-only.","error")
         self.paste_shortcut.setEnabled(self.store.writable)
         for widget in (self.rename_collection, self.delete): widget.setEnabled(self.store.writable and bool(self.scope))
         count = len(self.table.selectionModel().selectedRows())
         for widget in (self.move, self.remove, self.rename): widget.setEnabled(self.store.writable and (count == 1 if widget is self.rename else count > 0))
         self.auto_button.setEnabled(self.store.writable and count>0 and self.auto is not None)
+        self._empty_state()
 
     def _transaction(self, op):
         if not self.store.writable: return False
         try: candidate = op(self.library)
         except m.LibraryError as exc:
-            self.status.setText(reason(exc.code)); return False
+            self._status(reason(exc.code),"error"); return False
         problem = self.store.save(candidate)
         self._lock()
-        if problem: self.status.setText(problem); return False
-        self.library = candidate; self.refresh(); self.changed.emit(); return True
+        if problem: self._status(problem,"error"); return False
+        self.library = candidate; self.refresh(); set_tone(self.status,"success"); self.changed.emit(); return True
 
     def _show_auto_detail(self):
         rows=self.table.selectionModel().selectedRows()
-        self.auto_detail.setText(self.auto.detail(self.model.rows[rows[0].row()]) if self.auto is not None and len(rows)==1 else '')
+        self.auto_detail.setText(_safe_lines(self.auto.detail(self.model.rows[rows[0].row()])) if self.auto is not None and len(rows)==1 else '')
+        self.auto_detail.setVisible(bool(self.auto_detail.text())); self.auto_placeholder.setVisible(not bool(self.auto_detail.text()))
 
     def _auto_changed(self):
         if self.model.rows: self.model.dataChanged.emit(self.model.index(0,4),self.model.index(len(self.model.rows)-1,5),[Qt.DisplayRole,Qt.ToolTipRole])
@@ -159,14 +210,14 @@ class LibraryPanel(W.QWidget):
         interval=f'{hours} hour'+('' if hours==1 else 's')
         if hours is not None:
             active=[r for r in repos if r.active]; skipped=len(repos)-len(active); repos=active
-            if not repos: self.status.setText(f'No active GitHub {noun(skipped)} selected; {skipped} inactive {noun(skipped)} skipped'); return
+            if not repos: self._status(f'No active GitHub {noun(skipped)} selected; {skipped} inactive {noun(skipped)} skipped',"error"); return
             problems=[(repo,problem) for repo in repos if (problem:=self.auto.problem(repo))]
             if problems:
                 repo,problem=problems[0]; reason='no saved rules' if problem==NEEDS_RULES else 'no saved archive folder'
                 count=sum(p==problem for _,p in problems)
                 text=f"Not enabled: '{repo.display_name}' has {reason}. {problem}"
                 if len(selected)>1: text+=f' ({count} of {len(selected)} selected repositories need this.)'
-                self.status.setText(text); return
+                self._status(text,"error"); return
             root=self.auto.settings()['archive_root']
             text=(f'Enable Auto-Archive for {len(repos)} {noun(len(repos))} every {interval}? Checks run only while CoveArchive is open. '
                 f'The first check happens in {interval}, using the saved archive folder: {root}. '
@@ -177,7 +228,7 @@ class LibraryPanel(W.QWidget):
         if self._transaction(lambda lib:lib.set_auto_archive(ids,hours)):
             text=(f'Auto-Archive on for {len(ids)} {noun(len(ids))} every {interval}; first check in {interval}' if hours is not None else
                 f'Auto-Archive off for {len(ids)} {noun(len(ids))}; archives and queued downloads are unchanged')
-            self.status.setText(text+(f'; {skipped} inactive {noun(skipped)} skipped' if skipped else ''))
+            self._status(text+(f'; {skipped} inactive {noun(skipped)} skipped' if skipped else ''),"success")
 
     def refresh(self):
         self.tree.blockSignals(True); self.tree.clear()
@@ -204,21 +255,21 @@ class LibraryPanel(W.QWidget):
     def _selected(self): return [self.model.rows[i.row()].identity for i in self.table.selectionModel().selectedRows()]
     def _add(self, checked=False, *, text=None):
         if not self.store.writable: return
-        if text is None and not self.url.text().strip(): self.status.setText("Enter a repository URL"); return
+        if text is None and not self.url.text().strip(): self._status("Enter a repository URL"); return
         try: result = m.add_urls(self.library, self.url.text() if text is None else text, self.scope or None)
-        except m.LibraryError as exc: self.status.setText(reason(exc.code)); return
+        except m.LibraryError as exc: self._status(reason(exc.code),"error"); return
         if not result.added or self._transaction(lambda lib: result.library):
             if result.added: self.url.clear()
             failures = [f"Line {r.line}: {reason(r.code)}" for r in result.results if r.status == "FAILED"][:5]
-            self.status.setText(f"Added {result.added}, skipped {result.skipped} duplicate(s), failed {result.failed}" +
-                ("\n" + "\n".join(failures) if failures else ""))
+            self._status(f"Added {result.added}, skipped {result.skipped} duplicate(s), failed {result.failed}" +
+                ("\n" + "\n".join(failures) if failures else ""), "error" if result.failed else "success")
     def _bulk(self):
         text, ok = W.QInputDialog.getMultiLineText(self, "Bulk Add", "Repository URLs (one per line)")
         if ok: self._add(text=text)
     def _paste(self):
         if not self.store.writable: return
         if isinstance(W.QApplication.focusWidget(), (W.QLineEdit, W.QTextEdit, W.QPlainTextEdit, W.QAbstractSpinBox)): return
-        if not W.QApplication.clipboard().text().strip(): self.status.setText("Clipboard has no text"); return
+        if not W.QApplication.clipboard().text().strip(): self._status("Clipboard has no text"); return
         self._add(text=W.QApplication.clipboard().text())
     def _new(self):
         name, ok = W.QInputDialog.getText(self, "New collection", "Name")
@@ -237,21 +288,21 @@ class LibraryPanel(W.QWidget):
         if not selected: return
         choices = {"/ (Unsorted)": None, **{self.library.collection_path(c.id): c.id for c in self.library.collections}}
         name, ok = W.QInputDialog.getItem(self, "Move repositories", "Collection", list(choices), 0, False)
-        if ok and self._transaction(lambda lib: lib.move_repositories(selected, choices[name])): self.status.setText(f"Moved {len(selected)} to {name}")
+        if ok and self._transaction(lambda lib: lib.move_repositories(selected, choices[name])): self._status(f"Moved {len(selected)} to {name}","success")
     def _rename(self):
         selected = self._selected()
         if len(selected) != 1: return
         name, ok = W.QInputDialog.getText(self, "Rename repository", "Name (empty resets)")
-        if ok and self._transaction(lambda lib: lib.rename_repository(selected[0], name.strip() or None)): self.status.setText("Renamed")
+        if ok and self._transaction(lambda lib: lib.rename_repository(selected[0], name.strip() or None)): self._status("Renamed","success")
     def _remove(self):
         selected = self._selected()
         if selected and W.QMessageBox.question(self, "Remove repositories", f"Remove {len(selected)} from the list? Archives and saved rules are NOT touched.", W.QMessageBox.Yes | W.QMessageBox.No, W.QMessageBox.No) == W.QMessageBox.Yes:
-            if self._transaction(lambda lib: lib.remove_repositories(selected)): self.status.setText(f"Removed {len(selected)} from the list; archives untouched")
+            if self._transaction(lambda lib: lib.remove_repositories(selected)): self._status(f"Removed {len(selected)} from the list; archives untouched","success")
     def _import(self):
         if not self.store.writable or self.busy or self._closed: return
         path, _ = W.QFileDialog.getOpenFileName(self, "Import library", "", "JSON (*.json)")
         if not path: return
-        self._snapshot = self.library; self.busy = True; self._lock(); self.status.setText("Reading import file...")
+        self._snapshot = self.library; self.busy = True; self._lock(); self._status("Reading import file...")
         self._future = self._worker.submit(_prepare_import, path, self._snapshot); self._poll.start()
     def closeEvent(self, event):
         self._closed = True; self._poll.stop(); self._worker.shutdown(wait=False, cancel_futures=True); super().closeEvent(event)
@@ -264,7 +315,7 @@ class LibraryPanel(W.QWidget):
         self._lock()
         if self._closed or not self.window().isVisible(): return
         try: plan, candidate = self._future.result(); snapshot = self._snapshot
-        except m.LibraryError as exc: self.status.setText("Nothing was imported: " + reason(exc.code)); return
+        except m.LibraryError as exc: self._status("Nothing was imported: " + reason(exc.code),"error"); return
         box = W.QMessageBox(self); box.setWindowTitle("Import preview"); box.setTextFormat(Qt.PlainText)
         title = "Import from Git-Sync data" if plan.kind == "git-sync" else "Import from a CoveArchive list"
         box.setText(f"{title}\n{plan.entries} repositories in the file\n{plan.to_add} will be added\n{plan.duplicates} duplicate{'s' if plan.duplicates != 1 else ''} (already in your list or repeated in the file; skipped)\n{plan.inactive} of these are inactive (GitLab/Gitea/other): kept in the list but not archived\n{plan.new_collections} new collections will be created" +
@@ -275,7 +326,7 @@ class LibraryPanel(W.QWidget):
         accept = box.addButton("Import", W.QMessageBox.AcceptRole) if plan.valid else None
         box.exec()
         if accept is not None and box.clickedButton() == accept and self._transaction(lambda current: candidate if current is snapshot else plan.apply(current)):
-            self.status.setText(f"Added {plan.to_add}, skipped {plan.duplicates} duplicate(s), inactive {plan.inactive}")
+            self._status(f"Added {plan.to_add}, skipped {plan.duplicates} duplicate(s), inactive {plan.inactive}","success")
     def _export(self):
         if not self.store.writable: return
         path, _ = W.QFileDialog.getSaveFileName(self, "Export library", "", "JSON (*.json)")
@@ -284,10 +335,10 @@ class LibraryPanel(W.QWidget):
         roots = [self.store.path.parent if self.store.path is not None else None, *self.protected()]
         for folder in (os.path.normcase(os.path.realpath(root)) for root in roots if root):
             if target == folder or target.startswith(folder.rstrip(os.sep) + os.sep):
-                self.status.setText("Choose a location outside CoveArchive's data and archive folders"); return
+                self._status("Choose a location outside CoveArchive's data and archive folders","error"); return
         if (":" in os.path.basename(target) or (os.path.lexists(path) and not t.is_export_file(path))
                 or not os.path.isdir(os.path.dirname(os.path.abspath(path)))):
-            self.status.setText("Choose a new file name; only a previous CoveArchive export can be replaced"); return
+            self._status("Choose a new file name; only a previous CoveArchive export can be replaced","error"); return
         try: problem = atomic_write(path, t.export_library(self.library))
-        except m.LibraryError as exc: self.status.setText(reason(exc.code)); return
-        self.status.setText(problem or "Library exported")
+        except m.LibraryError as exc: self._status(reason(exc.code),"error"); return
+        self._status(problem or "Library exported","error" if problem else "success")
