@@ -27,11 +27,12 @@ class ReleaseAsset:
     created_at: str
     updated_at: str
     supported_extension: str | None
+    file_id: int | None = None
 
 
 @dataclass(frozen=True)
 class Release:
-    id: int
+    id: int | str
     tag_name: str
     name: str | None
     draft: bool
@@ -52,10 +53,16 @@ class ReleaseCatalog:
     pages: int
     requests: int
     redirects: int
-    duplicate_release_ids: tuple[int, ...]
+    duplicate_release_ids: tuple[int | str, ...]
     endpoint_path: str
     complete: bool
     atomic_snapshot: bool = field(default=False, init=False)
+
+
+def release_key_ok(provider, value, tag=None):
+    if provider == "gitlab":
+        return isinstance(value, str) and 1 <= len(value) <= 1024 and (tag is None or value == tag)
+    return type(value) is int and 1 <= value <= 2**63 - 1
 
 
 def _object(obj):
@@ -110,11 +117,14 @@ def _digest(obj):
     return original, algorithm, sha256
 
 
-def parse_asset(obj) -> ReleaseAsset:
+def parse_asset(obj, *, provider="github") -> ReleaseAsset:
     """Validate an asset, retaining publisher text and digest metadata verbatim."""
     obj = _object(obj)
     name = _value(obj, "name", str, nonempty=True)
     original, algorithm, sha256 = _digest(obj)
+    file_id = _value(obj,"file_id",int,optional=True,minimum=1) if provider=="gitlab" else None
+    if file_id is not None and not release_key_ok("github",file_id):
+        raise ReleaseSchemaError("Invalid file id.")
     return ReleaseAsset(
         id=_value(obj, "id", int, minimum=1),
         name=name,
@@ -128,14 +138,18 @@ def parse_asset(obj) -> ReleaseAsset:
         created_at=_date(obj, "created_at"),
         updated_at=_date(obj, "updated_at"),
         supported_extension=match_extension(name),
+        file_id=file_id,
     )
 
 
-def parse_release(obj) -> Release:
+def parse_release(obj, *, provider="github") -> Release:
     """Validate release fields without interpreting untrusted publisher text."""
     obj = _object(obj)
+    key = _value(obj, "id", str, nonempty=True) if provider=="gitlab" else _value(obj, "id", int, minimum=1)
+    if provider=="gitlab" and not release_key_ok(provider,key,obj.get("tag_name")):
+        raise ReleaseSchemaError("Invalid release key.")
     return Release(
-        id=_value(obj, "id", int, minimum=1),
+        id=key,
         tag_name=_value(obj, "tag_name", str, nonempty=True),
         name=_value(obj, "name", str, optional=True),
         draft=_value(obj, "draft", bool),
@@ -144,7 +158,7 @@ def parse_release(obj) -> Release:
         created_at=_date(obj, "created_at"),
         published_at=_date(obj, "published_at", optional=True),
         body=_value(obj, "body", str, optional=True),
-        assets=tuple(parse_asset(item) for item in _value(obj, "assets", list)),
+        assets=tuple(parse_asset(item,provider=provider) for item in _value(obj, "assets", list)),
         tarball_url=_value(obj, "tarball_url", str, optional=True),
         zipball_url=_value(obj, "zipball_url", str, optional=True),
     )

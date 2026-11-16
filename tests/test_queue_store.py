@@ -28,7 +28,7 @@ def item(i=1,root=native_root('C:/Archive'),**changes):
 def memory_store():
     from contextlib import contextmanager
     c=sqlite3.connect(':memory:',isolation_level=None,check_same_thread=False); c.row_factory=sqlite3.Row
-    c.execute(q._SCHEMA); c.execute(q._COOLDOWNS); c.execute(f'PRAGMA application_id={q.APPLICATION_ID}'); c.execute('PRAGMA user_version=2')
+    c.execute(q._SCHEMA_V3); c.execute(q._COOLDOWNS); c.execute(f'PRAGMA application_id={q.APPLICATION_ID}'); c.execute('PRAGMA user_version=3')
     store=object.__new__(q.QueueStore); store.path=Path(':memory:'); store.settings=m.QueueSettings(); store.clock=lambda:100
     class Connection:
         def execute(self,sql,*args): return c.execute("SELECT 'delete'") if sql=='PRAGMA journal_mode' else c.execute(sql,*args)
@@ -109,7 +109,7 @@ def test_provider_migration_native(tmp_path,monkeypatch,mode):
             with pytest.raises(m.QueueBusyError if mode=='busy' else m.QueueCorruptError): q.QueueStore(path)
             assert path.read_bytes()==before
     with sqlite3.connect(path) as c:
-        assert c.execute('PRAGMA user_version').fetchone()[0]==(2 if mode=='success' else 1)
+        assert c.execute('PRAGMA user_version').fetchone()[0]==(3 if mode=='success' else 1)
         assert c.execute('PRAGMA application_id').fetchone()[0]==q.APPLICATION_ID
         assert c.execute('SELECT '+columns+' FROM jobs ORDER BY seq').fetchall()==rows
 
@@ -122,7 +122,7 @@ def test_Q01_Q02_Q05_creation_reopen(tmp_path):
     assert e.job.created_at==100 and len(e.job.job_id)==32
     assert q.QueueStore(path).get(e.job.job_id)==e.job
     with sqlite3.connect(path) as c:
-        assert c.execute('pragma user_version').fetchone()==(2,)
+        assert c.execute('pragma user_version').fetchone()==(3,)
         assert c.execute('pragma journal_mode').fetchone()==('delete',)
 
 @pytest.mark.parametrize('action,state',[('pause',S.PAUSED),('cancel',S.CANCELLED)])
@@ -225,7 +225,7 @@ def test_Q25_untouched(tmp_path,kind):
     else:
         q.QueueStore(path)
         if kind=='newer':
-            with sqlite3.connect(path) as c: c.execute('pragma user_version=3')
+            with sqlite3.connect(path) as c: c.execute('pragma user_version=4')
         else: path.write_bytes(path.read_bytes()[:150])
     before=hashlib.sha256(path.read_bytes()).digest(); siblings=set(tmp_path.iterdir())
     with pytest.raises(m.QueueVersionError if kind=='newer' else m.QueueCorruptError) as err: q.QueueStore(path)
@@ -375,7 +375,7 @@ def test_Q01_fresh_process_open_race(tmp_path):
 
 @pytest.mark.parametrize('operation',['enqueue','claim','recover'])
 def test_Q25_F1_live_version_guard(db,operation):
-    with sqlite3.connect(db.path) as c: c.execute('PRAGMA user_version=3')
+    with sqlite3.connect(db.path) as c: c.execute('PRAGMA user_version=4')
     before=db.path.read_bytes()
     with pytest.raises(m.QueueVersionError):
         {'enqueue':lambda:db.enqueue(*item()),'claim':lambda:db.claim_next('a'),'recover':db.recover_interrupted}[operation]()

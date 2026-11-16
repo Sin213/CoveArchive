@@ -57,7 +57,7 @@ def test_codeberg_targets(text, owner, repo, releases):
     ('host', ["https://www.codeberg.org/o/r", "https://codeberg.org.evil.com/o/r", "https://codeberg.org./o/r",
         "https://codeberg.org%2eevil.com/o/r", "https://%63odeberg.org/o/r",
         "https://c\u043ed eberg.org/o/r".replace(" ", ""), "https://xn--codeberg-9jg.org/o/r",
-        "https://gitlab.com/o/r", "https://[::1]/o/r", ]),
+        "https://evil.com/o/r", "https://[::1]/o/r", ]),
     ('owner', ["https://codeberg.org/-owner/r", "https://codeberg.org/owner_/r",
         "https://codeberg.org/" + "a" * 41 + "/r", "https://codeberg.org/%41lice/r", ]),
     ('repo', ["https://codeberg.org/o", "https://codeberg.org/o/r.git", "https://codeberg.org/o/r.GIT",
@@ -148,7 +148,7 @@ def test_helpers_require_a_repository_target(repository):
         with pytest.raises(ValueError):
             helper(repository)
 
-@pytest.mark.parametrize("provider", ["gitlab", "GitHub", "", None])
+@pytest.mark.parametrize("provider", ["unknown", "GitHub", "", None])
 def test_unknown_display_provider_rejected(provider):
     with pytest.raises(ValueError):
         display_name(provider)
@@ -163,3 +163,8 @@ def test_providers_import_without_network_or_qt_dependencies():
     result = subprocess.run([sys.executable, "-I", "-B", "-c", script, str(source)],
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_gitlab_repository_and_display():
+    assert parse_repository_url("https://gitlab.com/o/r")==RepositoryTarget("o","r","gitlab","gitlab.com")
+    assert display_name("gitlab")=="GitLab"

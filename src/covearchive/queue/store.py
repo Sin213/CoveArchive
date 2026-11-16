@@ -1,6 +1,7 @@
 """Durable jobs; short connections and transactional project exclusion."""
 from contextlib import contextmanager, nullcontext
 import hashlib
+import json
 from pathlib import Path
 import ntpath
 import os
@@ -13,6 +14,7 @@ import time
 import uuid
 from covearchive.archive.naming import validate_root
 from covearchive.providers import validate_repository
+from covearchive.github.models import release_key_ok
 from .models import (JobState, TRANSITIONS, QueueError, QueueCorruptError, QueueVersionError,
     QueueBusyError, UnknownJobError, InvalidTransitionError, InvalidJobError, QueueSettings,
     QueueJob, Enqueued, safe_code)
@@ -27,6 +29,7 @@ state TEXT CHECK(state IN ('QUEUED','RUNNING','PAUSED','RETRY_WAIT','COMPLETED',
 retry_count INTEGER, last_error_code TEXT, next_attempt_at REAL, claimed_by TEXT, stop_requested TEXT,
 result_status TEXT, integrity TEXT, transferred INTEGER, created_at REAL, updated_at REAL)"""
 _SCHEMA=_SCHEMA_V1[:-1]+', host TEXT)'
+_SCHEMA_V3=_SCHEMA[:-1]+', project_id INTEGER, release_key TEXT, file_id INTEGER)'
 _COOLDOWNS='CREATE TABLE cooldowns (scope TEXT PRIMARY KEY, until REAL)'
 
 def default_queue_path():
@@ -66,29 +69,32 @@ class QueueStore:
             if self.path.is_file():
                 with self.path.open('rb') as source: header=source.read(72)
         except OSError: raise QueueError('database_unavailable') from None
-        migrating=header[:16]==b'SQLite format 3\0' and int.from_bytes(header[60:64],'big')==1
+        migrating=header[:16]==b'SQLite format 3\0' and int.from_bytes(header[60:64],'big') in (1,2)
         try:
             if migrating and self.path.stat().st_nlink!=1: raise OSError
         except OSError: raise QueueError('database_unavailable') from None
         with (RunnerLock(self.path) if migrating else nullcontext()), self._write(initializing=True) as c:
             version=c.execute('PRAGMA user_version').fetchone()[0]
             application=c.execute('PRAGMA application_id').fetchone()[0]
-            if version>2: raise QueueVersionError(self.path)
+            if version>3: raise QueueVersionError(self.path)
             schema=c.execute("SELECT name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
             if version==0 and application==0 and not schema:
                 c.execute('PRAGMA journal_mode=DELETE')
-                c.execute(_SCHEMA); c.execute(_COOLDOWNS); c.execute('PRAGMA user_version=2'); c.execute(f'PRAGMA application_id={APPLICATION_ID}')
+                c.execute(_SCHEMA_V3); c.execute(_COOLDOWNS); c.execute('PRAGMA user_version=3'); c.execute(f'PRAGMA application_id={APPLICATION_ID}')
             else:
                 self._check_schema(c,version)
                 if version==1:
                     if not migrating: raise QueueBusyError('runner_active')
                     self._migrate(c)
-                self._check_schema(c,2)
+                if version in (1,2):
+                    if not migrating: raise QueueBusyError('runner_active')
+                    self._migrate_v3(c)
+                self._check_schema(c,3)
 
     def _check_schema(self,c,version,*,full=True):
         schema=c.execute("SELECT name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
-        if (version not in (1,2) or c.execute('PRAGMA application_id').fetchone()[0]!=APPLICATION_ID
-                or [(r[0],r[1]) for r in schema]!=[('cooldowns',_COOLDOWNS),('jobs',_SCHEMA_V1 if version==1 else _SCHEMA)]
+        if (version not in (1,2,3) or c.execute('PRAGMA application_id').fetchone()[0]!=APPLICATION_ID
+                or [(r[0],r[1]) for r in schema]!=[('cooldowns',_COOLDOWNS),('jobs',{1:_SCHEMA_V1,2:_SCHEMA,3:_SCHEMA_V3}[version])]
                 or full and (c.execute('PRAGMA quick_check').fetchone()[0]!='ok'
                     or c.execute('PRAGMA journal_mode').fetchone()[0]!='delete')):
             raise QueueCorruptError(self.path)
@@ -110,6 +116,19 @@ class QueueStore:
             c.execute("DELETE FROM sqlite_sequence WHERE name='jobs'")
             c.execute("INSERT INTO sqlite_sequence(name,seq) VALUES ('jobs',?)",(sequence[0],))
         c.execute('PRAGMA user_version=2')
+
+    def _migrate_v3(self,c):
+        columns=','.join(r[1] for r in c.execute('PRAGMA table_info(jobs)'))
+        before=self._migration_snapshot(c,columns)
+        sequence=c.execute("SELECT seq FROM sqlite_sequence WHERE name='jobs'").fetchone()
+        c.execute('ALTER TABLE jobs RENAME TO jobs_v2'); c.execute(_SCHEMA_V3)
+        c.execute('INSERT INTO jobs ('+columns+') SELECT '+columns+' FROM jobs_v2 ORDER BY seq')
+        if self._migration_snapshot(c,columns)!=before: raise QueueCorruptError(self.path)
+        c.execute('DROP TABLE jobs_v2')
+        if sequence:
+            c.execute("DELETE FROM sqlite_sequence WHERE name='jobs'")
+            c.execute("INSERT INTO sqlite_sequence(name,seq) VALUES ('jobs',?)",(sequence[0],))
+        c.execute('PRAGMA user_version=3')
 
     @contextmanager
     def _connection(self):
@@ -139,10 +158,10 @@ class QueueStore:
             try:
                 if not initializing:
                     version=c.execute('PRAGMA user_version').fetchone()[0]
-                    if version>2: raise QueueVersionError(self.path)
-                    if version!=2:
+                    if version>3: raise QueueVersionError(self.path)
+                    if version!=3:
                         raise QueueCorruptError(self.path)
-                    self._check_schema(c,2,full=False)
+                    self._check_schema(c,3,full=False)
                 yield c; c.commit()
             except BaseException: c.rollback(); raise
 
@@ -174,16 +193,21 @@ class QueueStore:
             validate_root(root)
             root_key=(ntpath.normpath(str(root).replace('/','\\')).casefold()
                       if sys.platform == 'win32' else str(root))
-            if (any(type(i) is not int or not 1<=i<=2**63-1 for i in (release.id,asset.id))
+            gitlab=repository.provider=='gitlab'
+            if (not release_key_ok(repository.provider,release.id,release.tag_name)
+                    or type(asset.id) is not int or not 1<=asset.id<=2**63-1
+                    or gitlab and (repository.project_id is None or type(asset.file_id) is not int or not 1<=asset.file_id<=2**63-1)
                     or not any(a.id==asset.id for a in release.assets) or release.draft
                     or asset.state!='uploaded' or asset.supported_extension is None
                     or type(asset.size) is not int or not 0<=asset.size<=2**63-1
                     or any(not isinstance(s,str) or not 1<=len(s)<=1024 for s in (asset.name,release.tag_name))): raise ValueError
         except (ValueError,TypeError,AttributeError): raise InvalidJobError('invalid_job') from None
         key=repository.repo_key; project=root_key+'|'+key
-        return (repository.provider+'|'+key+'|'+str(release.id)+'|'+str(asset.id)+'|'+root_key,
-            repository.provider,repository.owner,repository.repo,key,release.id,asset.id,str(root),project,
-            _display(release.tag_name),_display(asset.name),asset.size,repository.host)
+        identity=(json.dumps([repository.provider,key,repository.project_id,release.id,asset.id,asset.file_id,root_key],ensure_ascii=True,separators=(',',':'))
+                  if gitlab else repository.provider+'|'+key+'|'+str(release.id)+'|'+str(asset.id)+'|'+root_key)
+        return (identity,repository.provider,repository.owner,repository.repo,key,None if gitlab else release.id,asset.id,str(root),project,
+            _display(release.tag_name),_display(asset.name),asset.size,repository.host,
+            repository.project_id,release.id if gitlab else None,asset.file_id if gitlab else None)
 
     def enqueue(self,repository,release,asset,archive_root):
         return self.enqueue_many(((repository,release,asset,archive_root),))[0]
@@ -200,7 +224,7 @@ class QueueStore:
                         outcome='requeued'
                     result.append(Enqueued(self._get(c,old['job_id']),outcome)); continue
                 job_id=uuid.uuid4().hex; now=self.clock()
-                c.execute("INSERT INTO jobs (job_id,identity,provider,owner,repo,repo_key,release_id,asset_id,archive_root,project_key,tag_name,asset_name,asset_size,host,state,retry_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'QUEUED',0,?,?)",(job_id,*value,now,now))
+                c.execute("INSERT INTO jobs (job_id,identity,provider,owner,repo,repo_key,release_id,asset_id,archive_root,project_key,tag_name,asset_name,asset_size,host,project_id,release_key,file_id,state,retry_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'QUEUED',0,?,?)",(job_id,*value,now,now))
                 result.append(Enqueued(self._get(c,job_id),'created'))
         return tuple(result)
 

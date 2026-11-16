@@ -70,11 +70,11 @@ def succeed(window, controller, *items):
 
 @pytest.mark.parametrize('isolated_data',[None])
 @pytest.mark.parametrize('code',['timeout','invalid_json','invalid_url','invalid_content_type'])
-@pytest.mark.parametrize('host,expected',[('github.com','GitHub'),('codeberg.org','Codeberg'),('evil.example',None)])
+@pytest.mark.parametrize('host,expected',[('github.com','GitHub'),('codeberg.org','Codeberg'),('gitlab.com','GitLab'),('evil.example',None)])
 def test_provider_portable_scan(isolated_data,host,expected,code):
     from types import SimpleNamespace as NS
     calls=[]; statuses=[]
-    view=NS(active_id=None,url=NS(text=lambda:f'https://{host}/Owner/Repo/releases',setAccessibleName=lambda x:None),controller=NS(job=None,start=calls.append),_clear=lambda:None,_status=lambda text,*a:statuses.append(text))
+    view=NS(active_id=None,url=NS(text=lambda:f'https://{host}/Owner/Repo'+('/-/releases' if host=='gitlab.com' else '/releases'),setAccessibleName=lambda x:None),controller=NS(job=None,start=calls.append),_clear=lambda:None,_status=lambda text,*a:statuses.append(text))
     MainWindow._start(view)
     assert calls==([f'https://{host}/Owner/Repo'] if expected else [])
     if expected:
@@ -93,7 +93,7 @@ def test_provider_save_rules_accessibility(isolated_data):
         MainWindow._selection_changed(v)
         text='Save rules (GitHub only)' if provider=='codeberg' else 'Save rules for this repository'
         assert v.save_rules.text()==text; assert v.save_rules.accessibleName()==text and v.save_rules.isEnabled()==(provider=='github')
-        assert ('Codeberg' in v.save_rules.accessibleDescription()) if provider=='codeberg' else v.save_rules.accessibleDescription()==text
+        assert v.save_rules.accessibleDescription()==('Saving rules is available for GitHub repositories only.' if provider=='codeberg' else text)
         assert v.rule_error.text()=='preference problem'
 
 def test_provider_codeberg_rules_preview_and_selection(ui,monkeypatch):
@@ -107,7 +107,7 @@ def test_provider_codeberg_rules_preview_and_selection(ui,monkeypatch):
     v.url.setText('https://codeberg.org/Owner/Repo/releases'); v.scan.click()
     source=replace(catalog(release(assets=[asset(1,'app.zip'),asset(2,'external.zip',state='external')])),repository=RepositoryTarget('Owner','Repo','codeberg','codeberg.org'))
     c.finish(w.ScanSuccess(RID,source)); v.root.setText(native_root('C:/Archive'))
-    assert not v.save_rules.isEnabled() and 'Codeberg' in v.save_rules.toolTip() and not v.include.text()
+    assert not v.save_rules.isEnabled() and v.save_rules.toolTip()=='Saving rules is available for GitHub repositories only.' and not v.include.text()
     assert str(NativePath('codeberg.org/Owner/Repo')) in v.destination.text()
     model=v.tree.model(); parent=model.index(0,0); assert model.data(model.index(1,5,parent))=='Not uploaded'
     assert not model.flags(model.index(1,0,parent)) & Qt.ItemIsUserCheckable
@@ -496,3 +496,24 @@ def test_F4_invalid_edit_cannot_save_previous_valid_rules(ui):
     v.save_rules.click()
     assert v.rule_error.text()=="Rules saved"
     assert v.preferences.load()[0]["repositories"]["owner/repo"]["include"]==["*.zip"]
+
+
+def test_gitlab_browse_status_rules_and_nested_destination(ui):
+    from test_gitlab import Wire, TARGET
+    from covearchive.archive.naming import release_folder_name
+    source=Wire().client().discover_releases(TARGET); r=source.releases[0]
+    r=replace(r,id='007',tag_name='007',assets=(r.assets[0],replace(r.assets[0],id=2,state='external_link'),replace(r.assets[0],id=3,state='unverifiable')))
+    source=replace(source,repository=replace(source.repository,owner='group/sub'),releases=(r,))
+    v,c=ui; assert 'gitlab.com' in v.url.placeholderText() and not c.calls
+    v.url.setText('gitlab.com/group/sub/cli'); v.scan.click()
+    c.finish(w.decode_response(w.encode_success(RID,source),RID)); v.checked.add(('007',r.assets[0].id)); v.root.setText(native_root('C:/Archive')); v._selection_changed()
+    model=v.tree.model(); parent=model.index(0,0)
+    assert model.data(model.index(1,5,parent))=='External link, not archived'
+    assert model.data(model.index(2,5,parent))=='Not verifiable: needs exactly one package file with size and SHA-256'
+    assert v.summary.text().startswith('GitLab | group/sub/CLI') and 'group' in v.destination.text() and 'sub' in v.destination.text()
+    assert release_folder_name('007','007') in v.destination.text() and v.url.accessibleName()=='GitLab URL'
+    assert not v.save_rules.isEnabled() and v.save_rules.toolTip()=='Saving rules is available for GitHub repositories only.'
+    v._save_rules(); assert v.rule_error.text()==v.save_rules.toolTip()
+
+    v.url.setText('gitlab.com/a/b/-/issues'); v.scan.click()
+    assert 'GitLab' in v.status.text() and 'Invalid URL' in v.status.text()

@@ -122,9 +122,11 @@ def name_key(name: str) -> str:
     return unicodedata.normalize("NFKC", unicodedata.normalize("NFKC", name).casefold())
 
 
-def release_folder_name(tag: str, release_id: int) -> str:
+def release_folder_name(tag: str, release_id: int | str) -> str:
     if not isinstance(tag, str):
         raise TypeError("Tag must be a string.")
+    if isinstance(release_id, str):
+        release_id = int.from_bytes(hashlib.sha256(release_id.encode("utf-8", "surrogatepass")).digest()[:8], "big") | 2**63
     if type(release_id) is not int:
         raise TypeError("Release id must be an integer.")
     if release_id < 1:
@@ -141,7 +143,9 @@ def release_folder_name(tag: str, release_id: int) -> str:
     return "release-" + part + suffix
 
 
-def is_release_folder(folder: str, release_id: int) -> bool:
+def is_release_folder(folder: str, release_id: int | str) -> bool:
+    if isinstance(release_id, str):
+        return folder == release_folder_name(release_id, release_id)
     return (type(release_id) is int and release_id >= 1 and isinstance(folder, str)
             and folder.startswith("release-") and folder.endswith("--" + str(release_id))
             and is_safe_component(folder, limit=MAX_RELEASE_FOLDER_LENGTH))
@@ -162,6 +166,9 @@ def project_folders(owner: str, repo: str) -> tuple[str, str]:
 
 def project_components(repository) -> tuple[str, ...]:
     parts = identity_components(repository)
+    if repository.provider == "gitlab":
+        folded = (p.casefold() if _units(p) > MAX_COMPONENT_LENGTH else p for p in parts[1:])
+        return parts[:1] + tuple(project_folders(p, p)[0] for p in folded)
     return parts[:-2] + project_folders(*parts[-2:])
 
 

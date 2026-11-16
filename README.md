@@ -431,3 +431,25 @@ Only native attachments with known sizes are eligible; external links and unknow
 sizes are excluded. Listings fail closed on pagination inconsistencies or limits;
 renamed repositories and download hosts beyond codeberg.org are unsupported.
 Attachment lists come from release listings (equal to the per-release assets endpoint for 221 live releases, maximum 21 assets; larger counts untested).
+
+## GitLab.com
+
+Public gitlab.com projects are supported anonymously, including nested namespaces.
+Eligible release links point to generic package files in the SAME project and resolve
+unambiguously to one package and one file with size and SHA-256 metadata.
+The publisher digest comes from GitLab package metadata; local SHA-256 is always
+computed, and matching hashes give `PUBLISHER_VERIFIED` integrity.
+
+Source archives, `/uploads` links, external URLs, other package types, other-project
+links, and names outside `[A-Za-z0-9._-]` (such as `+`) are unsupported.
+Private, self-hosted and authenticated projects are unsupported. Renamed-project
+redirects and every other 3xx response fail closed. Scans have a 400-request budget;
+more than roughly 380 referenced package versions may exceed that budget.
+Anonymous API rate limits apply; a 429 pauses queue retries using Retry-After.
+
+Layout: `<root>/gitlab.com/<namespaces...>/<project>/release-<tag>--<N>/`.
+`N` is a deterministic local folder discriminator, never a release ID; the exact
+release tag and numeric project ID are retained in metadata.
+GitLab archives use manifest schema v3; GitHub v1 and Codeberg v2 stay unchanged.
+The queue uses schema v3; older builds refuse to open a v3 queue.
+Save Rules and Auto-Archive remain available for GitHub repositories only.

@@ -77,7 +77,7 @@ def ensure_project(root: ArchiveRoot, repository: RepositoryTarget) -> Iterator[
         yield project
 
 
-def ensure_release(project: Directory, folder: str, release_id: int) -> Directory:
+def ensure_release(project: Directory, folder: str, release_id: int | str) -> Directory:
     """Use the established plan folder, including its release identity."""
     winfs._platform()
     if not naming.is_release_folder(folder, release_id):
@@ -341,7 +341,7 @@ def load_project_state(project: Directory) -> ProjectState:
             with project.open_dir(folder) as directory:
                 release, _ = _read_document(directory, naming.RELEASE_FILENAME)
             issues.append((folder, "unindexed_release"))
-            if (release.folder != folder or release.release_id != int(suffix[1])
+            if (release.folder != folder or not naming.is_release_folder(folder, release.release_id)
                     or (index is not None and release.repository != index.repository)
                     or release.release_id in indexed_ids):
                 issues.append((folder, "consistency"))
@@ -360,7 +360,7 @@ def load_project_state(project: Directory) -> ProjectState:
             issues.extend((folder, "consistency") for folder in folders)
         elif release_id not in candidates:
             issues.append((folders[0], "limit"))
-    unindexed = sorted(candidates.values(), key=lambda release: release.release_id)
+    unindexed = sorted(candidates.values(), key=lambda release: (isinstance(release.release_id, str), release.release_id))
     token = None if raw is None else hashlib.sha256(raw).hexdigest()
     return ProjectState(index, tuple(releases), token, tuple(issues), unindexed=tuple(unindexed))
 

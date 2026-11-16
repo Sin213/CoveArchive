@@ -119,7 +119,7 @@ def test_N08_release_folders_hostile_and_id_identity(tag):
     assert n.release_folder_name("..", 1) == "release-untagged--1"
 
 
-@pytest.mark.parametrize("value", [True, False, 0, -1, 1.0, "1", None])
+@pytest.mark.parametrize("value", [True, False, 0, -1, 1.0, None])
 def test_N09_release_ids_strict(value):
     rejected(lambda: n.release_folder_name("v1", value), error=(TypeError, ValueError))
 
@@ -242,3 +242,29 @@ def test_provider_components_and_budget(monkeypatch,platform,root):
     long=n.filename_limit(root,'Owner','Repo','release-v1--1',prefix=('codeberg.org',))
     assert long==short-13
     with pytest.raises(n.PathBudgetError): n.check_path_budget(root,'Owner','Repo','release-v1--1','x'*short,prefix=('codeberg.org',))
+
+
+def test_gitlab_string_release_key():
+    folder=n.release_folder_name("1","1")
+    assert n.is_release_folder(folder,"1") and not n.is_release_folder(folder,"01")
+
+
+@pytest.mark.parametrize("length,tail",[(121,".abcdefghijklmnop"),(121,".zip"),(150,".tar.gz"),(239,".abcdefghijklmno"),(255,"")])
+def test_gitlab_long_components_casefold(length,tail):
+    from dataclasses import replace
+    from covearchive.github.urls import RepositoryTarget
+    name="a"*length+tail; repo=RepositoryTarget("ns",name,"gitlab","gitlab.com",5)
+    assert n.project_components(repo)==n.project_components(replace(repo,repo=name.upper()))
+    assert n.project_components(repo)!=n.project_components(replace(repo,repo="b"+name[1:]))
+
+
+@pytest.mark.parametrize("name,expected",[('Repo', 'Repo'), ('CON', 'CON_+1143da2bc54c'), ('sub.', 'sub+790cb28d5fa8'), ('NUL', 'NUL_+99e624275901'), ('a+b', 'a+b+300273daf0bb')])
+def test_short_project_folder_bytes_unchanged(name,expected):
+    assert n.project_folders(name,name)==(expected,expected)
+    if name!="a+b":
+        from covearchive.github.urls import RepositoryTarget
+        assert n.project_components(RepositoryTarget(name,name,"gitlab","gitlab.com",5))[-2:]==(expected,expected)
+    if name in ("Repo","CON","NUL"):
+        from covearchive.github.urls import RepositoryTarget
+        for provider,host in (("github","github.com"),("codeberg","codeberg.org")):
+            assert n.project_components(RepositoryTarget(name,name,provider,host))[-2:]==(expected,expected)

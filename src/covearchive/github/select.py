@@ -23,7 +23,7 @@ class SelectedRelease:
 
 @dataclass(frozen=True)
 class ExcludedRelease:
-    release_id: int
+    release_id: int | str
     tag_name: str
     reason: Literal["draft", "prerelease"]
 

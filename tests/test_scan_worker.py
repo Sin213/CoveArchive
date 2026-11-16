@@ -239,3 +239,44 @@ def test_run_scan_dispatches_real_provider_factory(monkeypatch, provider):
                         "GitHubReleaseClient" if provider == "github" else "ForgejoReleaseClient", Client)
     result = w.decode_response(wire(w.run_scan(RID, f"https://{target.host}/Owner/Repo")), RID)
     assert result.catalog.repository == target
+
+
+@pytest.mark.parametrize('tag',['1.0','007'])
+def test_gitlab_wire(tag):
+    from test_gitlab import Wire, TARGET
+    wire_source=Wire(); source=wire_source.client().discover_releases(TARGET)
+    repo=replace(source.repository,owner='g/'+'sub/'*10+'end')
+    source=replace(source,repository=repo,releases=(replace(source.releases[0],id=tag,tag_name=tag),))
+    encoded=w.encode_success(RID,source); decoded=w.decode_response(encoded,RID).catalog
+    assert decoded.repository==repo and decoded.releases==source.releases and w.PROTOCOL_VERSION==2
+    obj=json.loads(encoded); obj['result']['releases'][0]['id']=5
+    with pytest.raises(w.ProtocolError): w.decode_response(wire(obj),RID)
+    obj=json.loads(w.encode_success(RID,catalog(release()))); obj['result']['releases'][0]['id']='5'
+    with pytest.raises(w.ProtocolError): w.decode_response(wire(obj),RID)
+
+
+def test_gitlab_scan_dispatch(monkeypatch):
+    import covearchive.gitlab as gl
+    from test_gitlab import Wire
+    transport=Wire(); monkeypatch.setattr(gl,'GitLabReleaseClient',transport.client)
+    decoded=w.decode_response(wire(w.run_scan(RID,'https://gitlab.com/gitlab-org/cli')),RID)
+    assert decoded.catalog.repository.project_id==34675721 and len(transport.calls)==4
+
+
+@pytest.mark.parametrize('field,value',[('project_id',None),('project_id',True),('duplicates',[5]),('file_id',True),('file_id',2**63)])
+def test_gitlab_wire_bounds(field,value):
+    from test_gitlab import Wire, TARGET
+    obj=json.loads(w.encode_success(RID,Wire().client().discover_releases(TARGET)))
+    if field=='file_id': obj['result']['releases'][0]['assets'][0]['file_id']=value
+    else: obj['result']['duplicate_release_ids' if field=='duplicates' else field]=value
+    with pytest.raises(w.ProtocolError): w.decode_response(wire(obj),RID)
+
+
+@pytest.mark.parametrize("provider",["gitlab","github"])
+def test_duplicate_wire_release_keys(provider):
+    from test_gitlab import Wire, TARGET
+    source=Wire().client().discover_releases(TARGET) if provider=="gitlab" else catalog(release())
+    obj=json.loads(w.encode_success(RID,source)); obj["result"]["releases"]*=2
+    if provider=="gitlab":
+        with pytest.raises(w.ProtocolError): w.decode_response(wire(obj),RID)
+    else: assert w.decode_response(wire(obj),RID).catalog.releases==source.releases*2

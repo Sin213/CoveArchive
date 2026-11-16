@@ -90,7 +90,9 @@ class ReleaseModel(QAbstractItemModel):
             return Qt.Checked if keys and count==len(keys) else Qt.PartiallyChecked if count else Qt.Unchecked
         if role != Qt.DisplayRole: return None
         if asset:
-            status = ("Not uploaded" if asset.state != "uploaded" else
+            status = ("External link, not archived" if asset.state == "external_link" else
+                "Not verifiable: needs exactly one package file with size and SHA-256" if asset.state == "unverifiable" else
+                "Not uploaded" if asset.state != "uploaded" else
                 "Unsupported format" if asset.supported_extension is None else
                 "Filtered out" if asset.supported_extension not in self.enabled else
                 "Eligible" if id(asset) in self.matches[root] else ("Excluded by filename rules" if not allowed(BuildRules((),self.rules.exclude),asset.name) else "Not matched by include rules") if id(asset) in self.base[root] else "Duplicate asset")
@@ -127,7 +129,7 @@ class MainWindow(QMainWindow):
         central = QWidget(); self.tabs=QTabWidget(); self.setCentralWidget(self.tabs); self.tabs.addTab(central,"Browse"); layout = QVBoxLayout(central); layout.setSpacing(4); layout.setContentsMargins(8,8,8,8)
         layout.addWidget(QLabel("CoveArchive - part of the Cove Nexus family"))
         row = QHBoxLayout(); layout.addLayout(row)
-        self.url = QLineEdit(); self.url.setPlaceholderText("https://github.com/owner/repository/releases or codeberg.org/owner/repository")
+        self.url = QLineEdit(); self.url.setPlaceholderText("https://github.com/owner/repository/releases, codeberg.org/owner/repository or gitlab.com/group/project")
         self.scan = QPushButton("Scan"); self.cancel = QPushButton("Cancel Scan"); self.cancel.setEnabled(False)
         row.addWidget(self.url,1); row.addWidget(self.scan); row.addWidget(self.cancel)
         filters = QHBoxLayout(); layout.addLayout(filters)
@@ -237,7 +239,8 @@ class MainWindow(QMainWindow):
 
     def _start(self):
         if self.active_id is not None or self.controller.job is not None: return
-        self._scan_provider='codeberg' if self.url.text().lower().startswith(('https://codeberg.org/','codeberg.org/')) else 'github'
+        text=self.url.text().strip().lower()
+        self._scan_provider=next((p for p,h in (('gitlab','gitlab.com'),('codeberg','codeberg.org')) if text.startswith(('https://'+h+'/',h+'/'))),'github')
         try:
             target = parse_repository_url(self.url.text())
             if isinstance(target,ReleaseTagTarget):
@@ -336,7 +339,7 @@ class MainWindow(QMainWindow):
     def _selection_changed(self):
         github=bool(self.catalog and self.catalog.repository.provider=='github')
         self.save_rules.setEnabled(bool(self.show_catalog and github))
-        self.save_rules.setToolTip('Saving rules is unavailable for Codeberg repositories.' if self.catalog and not github else '')
+        self.save_rules.setToolTip('Saving rules is available for GitHub repositories only.' if self.catalog and not github else '')
         text='Save rules (GitHub only)' if self.catalog and not github else 'Save rules for this repository'
         self.save_rules.setText(text); self.save_rules.setAccessibleName(text)
         self.save_rules.setAccessibleDescription(self.save_rules.toolTip() or 'Save rules for this repository')
@@ -349,7 +352,7 @@ class MainWindow(QMainWindow):
             self.rule_error.setText("Scan a repository before saving rules")
             return
         if self.catalog.repository.provider!='github':
-            self.rule_error.setText('Saving rules is unavailable for Codeberg repositories.'); return
+            self.rule_error.setText('Saving rules is available for GitHub repositories only.'); return
         try:
             self.rules=BuildRules(parse_patterns(self.include.text()),parse_patterns(self.exclude.text()))
         except BuildFilterError as error:

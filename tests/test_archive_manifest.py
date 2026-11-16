@@ -150,7 +150,7 @@ def test_M10_exact_json_order_roundtrip_and_ascii(release):
     assert "\\u00e9" in dump(unicode_value) and "\u00e9" not in dump(unicode_value)
 
 
-@pytest.mark.parametrize("version", [0, 3, -1, True, "1", None, 1.0])
+@pytest.mark.parametrize("version", [0, 4, -1, True, "1", None, 1.0])
 @pytest.mark.parametrize("release", [False, True])
 def test_M11_unsupported_versions_never_downgraded(version, release):
     data = document(release)

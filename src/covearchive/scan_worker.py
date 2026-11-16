@@ -7,7 +7,7 @@ import re
 import sys
 import threading
 
-from covearchive.github.models import ReleaseCatalog, parse_release
+from covearchive.github.models import ReleaseCatalog, parse_release, release_key_ok
 from covearchive.github.urls import GitHubUrlError, RepositoryTarget, ReleaseTagTarget
 from covearchive.providers import parse_repository_url, validate_repository
 
@@ -18,7 +18,7 @@ DEFAULT_DEADLINE_SECONDS = 180
 ERROR_CODES = frozenset("invalid_target credentialed_session not_found unauthorized forbidden rate_limited "
     "server_error timeout network invalid_json invalid_root too_many_items invalid_release response_too_large "
     "bad_pagination unsafe_redirect gone unexpected_status incomplete_scan github_api_error invalid_url "
-    "unsupported_target bad_request result_too_large internal_error invalid_content_type".split())
+    "unsupported_target bad_request result_too_large internal_error invalid_content_type repository_mismatch asset_changed".split())
 RELEASE_KEYS = frozenset("id tag_name name draft prerelease immutable created_at published_at body assets tarball_url zipball_url".split())
 ASSET_KEYS = frozenset("id name size state content_type browser_download_url digest created_at updated_at".split())
 
@@ -102,10 +102,10 @@ def parse_request(line):
     return obj["request_id"], obj["url"]
 
 
-def _release_wire(release):
+def _release_wire(release, provider="github"):
     obj = {key: getattr(release, key) for key in RELEASE_KEYS - {"assets", "body", "tarball_url", "zipball_url"}}
     obj["assets"] = [{key: (asset.original_digest if key == "digest" else getattr(asset, key))
-                      for key in ASSET_KEYS} for asset in release.assets]
+                      for key in (ASSET_KEYS | {"file_id"} if provider=="gitlab" else ASSET_KEYS)} for asset in release.assets]
     return obj
 
 
@@ -115,10 +115,10 @@ def encode_success(request_id, catalog):
                             reason="incomplete", cause_code=None))
     repository = validate_repository(catalog.repository)
     data = _dump(dict(protocol=PROTOCOL_VERSION, request_id=request_id, status="ok", result=dict(
-        owner=repository.owner, repo=repository.repo, provider=repository.provider, host=repository.host, pages=catalog.pages,
+        owner=repository.owner, repo=repository.repo, provider=repository.provider, host=repository.host, project_id=repository.project_id, pages=catalog.pages,
         requests=catalog.requests, redirects=catalog.redirects,
         duplicate_release_ids=list(catalog.duplicate_release_ids),
-        releases=[_release_wire(release) for release in catalog.releases])))
+        releases=[_release_wire(release,repository.provider) for release in catalog.releases])))
     if len(data) > MAX_RESPONSE_BYTES:
         return encode_error(request_id, "result_too_large")
     return data
@@ -180,13 +180,15 @@ def decode_response(data, expected_request_id):
                 _int(detail["pages_completed"]); _text(detail["reason"], 200)
                 _require(detail["cause_code"] is None or detail["cause_code"] in ERROR_CODES)
             return ScanFailure(obj["request_id"], code, item["http_status"], item["message"], detail)
-        _keys(item, ("owner", "repo", "provider", "host", "pages", "requests", "redirects", "duplicate_release_ids", "releases"))
-        _text(item["owner"], 40); _text(item["repo"], 100)
+        _keys(item, ("owner", "repo", "provider", "host", "project_id", "pages", "requests", "redirects", "duplicate_release_ids", "releases"))
+        _text(item["owner"], 2048 if item["provider"]=="gitlab" else 40); _text(item["repo"], 255 if item["provider"]=="gitlab" else 100)
         _text(item["provider"], 16); _text(item["host"], 253)
-        target = validate_repository(RepositoryTarget(item["owner"], item["repo"], item["provider"], item["host"]))
+        target = validate_repository(RepositoryTarget(item["owner"], item["repo"], item["provider"], item["host"], item["project_id"]))
+        _require(target.provider!="gitlab" or target.project_id is not None)
         for key in ("pages", "requests", "redirects"): _int(item[key])
         _require(type(item["duplicate_release_ids"]) is list and len(item["duplicate_release_ids"]) <= 10000)
         for value in item["duplicate_release_ids"]: _int(value)
+        _require(target.provider!="gitlab" or not item["duplicate_release_ids"])
         _require(type(item["releases"]) is list and len(item["releases"]) <= 10000)
         releases = []
         for release in item["releases"]:
@@ -194,9 +196,11 @@ def decode_response(data, expected_request_id):
             _require(all(release.get(key) is None for key in ("body", "tarball_url", "zipball_url")))
             _require(type(release.get("assets")) is list and len(release["assets"]) <= 1000)
             for asset in release["assets"]:
-                _require(type(asset) is dict and set(asset) <= ASSET_KEYS)
+                _require(type(asset) is dict and set(asset) <= (ASSET_KEYS | {"file_id"} if target.provider=="gitlab" else ASSET_KEYS))
+            _require(release_key_ok(target.provider,release.get("id"),release.get("tag_name")))
             _bounded(release)
-            releases.append(parse_release(release))
+            releases.append(parse_release(release,provider=target.provider))
+        _require(target.provider!="gitlab" or len({r.id for r in releases})==len(releases))
         catalog = ReleaseCatalog(target, tuple(releases), item["pages"], item["requests"], item["redirects"],
                                  tuple(item["duplicate_release_ids"]), "", True)
         return ScanSuccess(obj["request_id"], catalog)
@@ -211,7 +215,10 @@ def run_scan(request_id, url, *, client_factory=None):
         if isinstance(target, ReleaseTagTarget):
             return json.loads(encode_error(request_id, "unsupported_target"))
         if client_factory is None:
-            if target.provider == "codeberg":
+            if target.provider == "gitlab":
+                from covearchive.gitlab import GitLabReleaseClient
+                client_factory = GitLabReleaseClient
+            elif target.provider == "codeberg":
                 from covearchive.forgejo import ForgejoReleaseClient
                 client_factory = ForgejoReleaseClient
             else:

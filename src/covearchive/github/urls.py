@@ -48,6 +48,7 @@ class RepositoryTarget:
     repo: str
     provider: str = "github"
     host: str = "github.com"
+    project_id: int | None = None
 
     @property
     def repo_key(self) -> str:
@@ -61,6 +62,7 @@ class ReleaseListTarget:
     repo: str
     provider: str = "github"
     host: str = "github.com"
+    project_id: int | None = None
 
     @property
     def repo_key(self) -> str:

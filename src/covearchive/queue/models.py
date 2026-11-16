@@ -58,7 +58,7 @@ class QueueJob:
     owner: str
     repo: str
     repo_key: str
-    release_id: int
+    release_id: int | None
     asset_id: int
     archive_root: str
     project_key: str
@@ -76,6 +76,9 @@ class QueueJob:
     created_at: float
     updated_at: float
     host: str='github.com'
+    project_id: int | None=None
+    release_key: str | None=None
+    file_id: int | None=None
 
 @dataclass(frozen=True)
 class Enqueued:

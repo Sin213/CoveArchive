@@ -38,7 +38,7 @@ class ArchiveResult:
     status: ArchiveStatus
     code: str | None
     asset_id: int
-    release_id: int
+    release_id: int | str
     saved_name: str | None = None
     release_folder: str | None = None
     change: str | None = None
@@ -97,8 +97,8 @@ def _restorable(project, state, release_id, folder, selected_name=None):
 def _state(project, repository, release_id, folder=None, selected_name=None):
     state = store.load_project_state(project)
     documents = state.releases + state.unindexed
-    if ((state.index is not None and state.index.repository.repo_key != repository.repo_key)
-            or any(r.repository.repo_key != repository.repo_key for r in documents)):
+    if ((state.index is not None and (state.index.repository.repo_key, state.index.repository.project_id) != (repository.repo_key, repository.project_id))
+            or any((r.repository.repo_key, r.repository.project_id) != (repository.repo_key, repository.project_id) for r in documents)):
         raise DownloadError("repository_mismatch")
     for name, issue in state.issues:
         if name == naming.INDEX_FILENAME:

@@ -15,7 +15,7 @@ import json
 import re
 from urllib.parse import quote
 
-from covearchive.github.models import Release
+from covearchive.github.models import Release, release_key_ok
 from covearchive.jsondepth import check_json_depth
 from covearchive.github.urls import RepositoryTarget
 from covearchive.providers import canonical_url, validate_repository
@@ -24,7 +24,7 @@ from .naming import RELEASE_FILENAME, is_release_folder, is_safe_component, name
 
 
 SCHEMA_VERSION = 1
-MAX_SCHEMA_VERSION = 2
+MAX_SCHEMA_VERSION = 3
 PROVIDER = "github"
 STATUS_PLANNED = "planned"
 STATUS_COMPLETED = "completed"
@@ -94,12 +94,15 @@ def _unique(values):
 def _repository(repository):
     try:
         validate_repository(repository)
+        if repository.provider == "gitlab" and repository.project_id is None:
+            raise ValueError
     except (ValueError, TypeError) as exc:
         raise ManifestError("identity") from exc
 
 
 def _release_fields(record):
-    _integer(record.release_id, 2**63 - 1, "id", 1)
+    if not release_key_ok("gitlab" if isinstance(record.release_id, str) else "github", record.release_id, record.tag):
+        raise ManifestError("id")
     _text(record.tag, MAX_TAG_LENGTH)
     if not isinstance(record.folder, str) or len(record.folder) > 64 or not is_release_folder(record.folder, record.release_id):
         raise ManifestError("path")
@@ -116,7 +119,8 @@ def _assets(items):
 
 def _source(repository, tag):
     try:
-        return canonical_url(repository) + "/releases/tag/" + quote(tag, safe="/")
+        route = "/-/releases/" if repository.provider == "gitlab" else "/releases/tag/"
+        return canonical_url(repository) + route + quote(tag, safe="/" if repository.provider != "gitlab" else "")
     except UnicodeError:
         return None
 
@@ -156,7 +160,7 @@ class AssetRecord:
 
 @dataclass(frozen=True)
 class ReleaseRecord:
-    release_id: int
+    release_id: int | str
     tag: str
     folder: str
     assets: tuple[AssetRecord, ...]
@@ -178,6 +182,8 @@ class ProjectIndex:
             raise ManifestError("field")
         if sum(len(r.assets) for r in releases) > MAX_TOTAL_ASSETS:
             raise ManifestError("limit")
+        if any(not release_key_ok(self.repository.provider, r.release_id, r.tag) for r in releases):
+            raise ManifestError("id")
         _unique(r.release_id for r in releases)
         _unique(name_key(r.folder) for r in releases)
         _unique(a.asset_id for r in releases for a in r.assets)
@@ -190,7 +196,7 @@ class ProjectIndex:
 @dataclass(frozen=True)
 class ReleaseManifest:
     repository: RepositoryTarget
-    release_id: int
+    release_id: int | str
     tag: str
     folder: str
     title: str | None
@@ -202,6 +208,8 @@ class ReleaseManifest:
     def __post_init__(self):
         _repository(self.repository)
         _release_fields(self)
+        if not release_key_ok(self.repository.provider, self.release_id, self.tag):
+            raise ManifestError("id")
         _text(self.title, 1024, optional=True)
         if self.published_at is not None:
             try:
@@ -234,6 +242,8 @@ def _values(record, keys):
 
 def _header(repository):
     identity = dict(owner=repository.owner, name=repository.repo, key=repository.repo_key)
+    if repository.provider == "gitlab":
+        return dict(schema_version=3, provider="gitlab", repository=dict(host=repository.host, project_id=repository.project_id, **identity))
     if repository.provider == "codeberg":
         return dict(schema_version=2, provider="codeberg", repository=dict(host=repository.host, **identity))
     return dict(schema_version=SCHEMA_VERSION, provider=PROVIDER, repository=identity)
@@ -293,14 +303,15 @@ def _parse(text, cap, keys):
     if type(data["schema_version"]) is not int or not 1 <= data["schema_version"] <= MAX_SCHEMA_VERSION:
         raise UnsupportedVersionError("version")
     _keys(data, keys)
-    if data["provider"] != (PROVIDER if data["schema_version"] == 1 else "codeberg"):
+    if data["provider"] != {1: PROVIDER, 2: "codeberg", 3: "gitlab"}[data["schema_version"]]:
         raise ManifestError("field")
     return data
 
 
 def _load_repository(obj, provider=PROVIDER):
-    _keys(obj, ("owner", "name", "key") if provider == PROVIDER else ("host", "owner", "name", "key"))
-    repository = RepositoryTarget(obj["owner"], obj["name"], provider, obj.get("host", "github.com"))
+    keys = ("owner", "name", "key") if provider == PROVIDER else ("host", "owner", "name", "key")
+    _keys(obj, keys + (("project_id",) if provider == "gitlab" else ()))
+    repository = RepositoryTarget(obj["owner"], obj["name"], provider, obj.get("host", "github.com"), obj.get("project_id"))
     _repository(repository)
     if obj["key"] != repository.repo_key:
         raise ManifestError("identity")

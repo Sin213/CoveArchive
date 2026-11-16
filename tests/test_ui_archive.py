@@ -199,7 +199,7 @@ def test_unavailable_queue_preserves_bytes_and_never_reopens(tmp_path,rig,kind,m
     if kind=="corrupt": path.write_bytes(b"corrupt queue")
     else:
         QueueStore(path)
-        with sqlite3.connect(path) as db: db.execute("pragma user_version=3")
+        with sqlite3.connect(path) as db: db.execute("pragma user_version=4")
     original=path.read_bytes(); bridge,sink=rig()
     assert not bridge.is_open and not sink.views[-1].usable and sink.views[-1].problem and not sink.views[-1].jobs
     assert not bridge.enqueue(request())

@@ -134,4 +134,4 @@ def test_migrating_restored_queue_never_starts_work(tmp_path,wire):
         legacy_queue(c); c.execute("DELETE FROM jobs WHERE state!='QUEUED'")
     store=QueueStore(path); assert len(store.list_jobs())==1 and store.list_jobs()[0].state==S.QUEUED
     assert not wire.log
-    with sqlite3.connect(path) as c: assert c.execute('PRAGMA user_version').fetchone()[0]==2
+    with sqlite3.connect(path) as c: assert c.execute('PRAGMA user_version').fetchone()[0]==3

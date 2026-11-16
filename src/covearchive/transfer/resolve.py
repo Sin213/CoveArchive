@@ -38,6 +38,7 @@ PROVIDER_HOSTS = {
     "github": ProviderHosts(frozenset({"api.github.com"}), frozenset(("api.github.com",
         "release-assets.githubusercontent.com", "objects.githubusercontent.com", "github-releases.githubusercontent.com"))),
     "codeberg": ProviderHosts(frozenset({"codeberg.org"}), frozenset({"codeberg.org"})),
+    "gitlab": ProviderHosts(frozenset({"gitlab.com"}), frozenset({"gitlab.com"})),
 }
 
 
@@ -227,7 +228,19 @@ def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=No
     except (ValueError,TypeError,UnicodeError): invalid = True
     if invalid: raise DownloadError("invalid_asset_identity") from None
     provider = repository.provider
+    gitlab = provider == "gitlab"
     metadata = codeberg = provider == "codeberg"
+    if gitlab:
+        from covearchive.gitlab import parse_package_url, build_package_url
+        try:
+            parts = parse_package_url(asset.browser_download_url)
+            if (repository.project_id is None or parts[0] != repository.project_id or parts[3] != asset.name
+                    or asset.state != "uploaded" or type(asset.file_id) is not int or not 1 <= asset.file_id <= 2**63-1
+                    or not isinstance(asset.sha256,str) or re.fullmatch(r"[0-9a-fA-F]{64}",asset.sha256) is None):
+                raise ValueError
+            package_url = build_package_url(*parts)
+        except (ValueError,TypeError,UnicodeError):
+            raise DownloadError("invalid_asset_identity") from None
     if codeberg and (not isinstance(release,Release) or type(release.id) is not int
             or not 1 <= release.id <= 2**63-1 or asset not in release.assets or asset.state != "uploaded"):
         raise DownloadError("invalid_asset_identity") from None
@@ -246,6 +259,9 @@ def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=No
             headers.pop("X-GitHub-Api-Version")
             headers["Accept"] = "application/json"
             entry = f"https://codeberg.org/api/v1/repos/{repository.owner}/{repository.repo}/releases/{release.id}/assets/{asset.id}"
+        if gitlab:
+            headers.pop("X-GitHub-Api-Version")
+            entry = package_url
         url, visited, hops, retries, refreshed = entry, {entry}, 0, 0, False
         deadline = clock()+policy.deadline_seconds
         while True:
@@ -268,7 +284,7 @@ def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=No
                 _pause(2**retries,policy,cancel,sleep,clock,deadline); retries += 1; continue
             _check(cancel,clock,deadline); _peer(response,policy)
             status, values = response.status_code, response.headers
-            if metadata and 300 <= status < 400: raise DownloadError("unsafe_redirect") from None
+            if (metadata or gitlab) and 300 <= status < 400: raise DownloadError("unsafe_redirect") from None
             if status in (301,302,303,307,308):
                 location = values.get("Location")
                 if not _safe_text(location): raise DownloadError("unsafe_redirect") from None
@@ -333,6 +349,8 @@ def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=No
                 continue
             if length is not None and (not re.fullmatch(r"[0-9]{1,20}",length) or int(length) != asset.size):
                 raise DownloadError("size_mismatch") from None
+            if gitlab and "x-checksum-sha256" in values and values["x-checksum-sha256"].lower() != asset.sha256.lower():
+                raise DownloadError("asset_changed") from None
             yield _chunks(response,asset.size,cancel,clock,deadline)
             break
     finally:

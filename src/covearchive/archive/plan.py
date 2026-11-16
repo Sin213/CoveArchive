@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from pathlib import PurePath, PureWindowsPath, PurePosixPath
 import sys
 
-from covearchive.github.models import Release, ReleaseAsset, ReleaseCatalog
+from covearchive.github.models import Release, ReleaseAsset, ReleaseCatalog, release_key_ok
 from covearchive.github.select import ExcludedRelease, select_releases
 from covearchive.github.urls import RepositoryTarget
 from covearchive.providers import validate_repository
@@ -63,7 +63,7 @@ class ReleasePlan:
 
 @dataclass(frozen=True)
 class RetainedEntry:
-    release_id: int
+    release_id: int | str
     asset_id: int | None
     reason: str
 
@@ -84,7 +84,15 @@ def _repository_key(repository):
         validate_repository(repository)
     except (ValueError, TypeError) as exc:
         raise PlanError("repository") from exc
-    return repository.repo_key
+    if repository.provider == "gitlab" and repository.project_id is None:
+        raise PlanError("repository")
+    return repository.repo_key, repository.project_id
+
+
+def _key_order(value):
+    if isinstance(value, (int, float)):
+        return 0, value
+    return (1, value) if isinstance(value, str) else (2, type(value).__name__)
 
 
 def _normalize(source, recorded_owners):
@@ -104,8 +112,8 @@ def _normalize(source, recorded_owners):
                 raise PlanError("asset_conflict")
             owners[asset.id] = release.id
             assets[asset.id] = asset
-        normalized[release.id] = replace(release, assets=tuple(assets[i] for i in sorted(assets)))
-    return {i: normalized[i] for i in sorted(normalized)}
+        normalized[release.id] = replace(release, assets=tuple(assets[i] for i in sorted(assets, key=_key_order)))
+    return {i: normalized[i] for i in sorted(normalized, key=_key_order)}
 
 
 def _retained(current, recorded, selection):
@@ -127,7 +135,7 @@ def _retained(current, recorded, selection):
                       "asset_filtered" if old.asset_id not in selected[release_id] else None)
             if reason:
                 result.append(RetainedEntry(release_id, old.asset_id, reason))
-    return tuple(sorted(result, key=lambda r: (r.release_id, r.asset_id or 0, r.reason)))
+    return tuple(sorted(result, key=lambda r: (_key_order(r.release_id), r.asset_id or 0, r.reason)))
 
 
 def plan_archive(source, *, archive_root, repository=None, index=None,
@@ -149,18 +157,19 @@ def _plan_archive(source, *, archive_root, repository, index, include_prerelease
         repository, source = source.repository, source.releases
     key = _repository_key(repository)
     if index is not None:
-        if not isinstance(index, ProjectIndex) or index.repository.repo_key != key:
+        if not isinstance(index, ProjectIndex) or _repository_key(index.repository) != key:
             raise PlanError("repository")
         repository = index.repository  # Persisted spelling owns the directory names.
     recorded = {r.release_id: r for r in index.releases} if index is not None else {}
     recorded_owners = {a.asset_id: r.release_id for r in recorded.values() for a in r.assets}
     # Consume a caller's complete iterable once; check conflicts before filtering.
-    current = _normalize(tuple(source), recorded_owners)
+    source = tuple(source)
+    current = _normalize(source, recorded_owners)
     selection = select_releases(current.values(), include_prereleases=include_prereleases,
                                 enabled_extensions=enabled_extensions)
     for selected in selection.releases:
         r = selected.release
-        if type(r.id) is not int or not 1 <= r.id <= 2**63 - 1:
+        if not release_key_ok(repository.provider, r.id, r.tag_name):
             raise PlanError("unrepresentable")
         for match in selected.matches:
             a = match.asset
@@ -168,7 +177,7 @@ def _plan_archive(source, *, archive_root, repository, index, include_prerelease
                 raise PlanError("unrepresentable")
             AssetRecord(a.id, a.name, "a.zip", a.size, a.sha256, None, "planned")
         # Use a safe placeholder tag until the real constructor validates remote text.
-        folder = recorded[r.id].folder if r.id in recorded else naming.release_folder_name("", r.id)
+        folder = recorded[r.id].folder if r.id in recorded else naming.release_folder_name(r.tag_name if repository.provider == "gitlab" else "", r.id)
         ReleaseManifest(repository, r.id, r.tag_name, folder, None, None, False, None, ())
     components = naming.project_components(repository)
     owner_dir, repo_dir = components[-2:]

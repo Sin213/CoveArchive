@@ -375,7 +375,9 @@ def test_Q07_snapshot_progress(tmp_path):
 def test_Q25_F1_runner_live_version(tmp_path):
     import sqlite3
     calls=[]; store,runner=prepare(tmp_path,[item()],archive=lambda *a,**k:calls.append(1))
-    with sqlite3.connect(store.path) as c: c.execute('PRAGMA user_version=3')
+    with sqlite3.connect(store.path) as c:
+        assert c.execute('PRAGMA user_version').fetchone()[0]==3
+        c.execute('PRAGMA user_version=4')
     before=store.path.read_bytes()
     try:
         with pytest.raises(m.QueueVersionError): runner.run_pending()
@@ -657,3 +659,71 @@ def test_Q18_H2_persisted_budget(tmp_path,code,count,maximum,paused,exhausted):
         if exhausted:
             assert runner.retry(j.job_id).retry_count==0
             runner.run_pending(); assert calls==['catalog','archive'] and store.get(j.job_id).state==S.COMPLETED
+
+
+@pytest.mark.parametrize('mode,code',[('ok',None),('tag','asset_changed'),('file','asset_changed'),('size','asset_changed'),('missing','asset_unavailable'),('release','release_removed'),('project','repository_mismatch'),('upstream','upstream_removed'),('state','asset_changed'),('rate','rate_limited')])
+def test_gitlab_runner_resolution(tmp_path,monkeypatch,mode,code):
+    from test_gitlab import Wire, TARGET
+    import covearchive.gitlab as gl
+    wire=Wire(); repo=replace(TARGET,project_id=34675721); release=wire.client().resolve_release(repo,'v1.130.0')
+    assets=tuple(replace(release.assets[0],id=i+1) for i in range(36)); release=replace(release,assets=assets)
+    store=QueueStore(tmp_path/'gl.db',clock=lambda:100); store.enqueue_many((repo,release,a,str(tmp_path)) for a in assets)
+    calls=[]
+    def resolve(actual,tag):
+        calls.append((actual,tag))
+        if mode=='tag': return replace(release,id='other',tag_name='other')
+        if mode=='release': raise gl.ReleaseNotFoundError()
+        if mode=='upstream': raise g.NotFoundError()
+        if mode=='project': raise g.GitHubApiError(code='repository_mismatch')
+        if mode=='rate': raise g.RateLimitError(kind='too_many_requests',status=429,retry_after_seconds=17,retry_at=117)
+        return replace(release,assets=() if mode=='missing' else tuple(replace(a,state='external') if mode=='state' else replace(a,file_id=99) if mode=='file' else replace(a,size=a.size+1) if mode=='size' else a for a in assets))
+    with QueueRunner(store,resolve=resolve,archive=lambda *a,**k:result(),clock=lambda:100) as runner:
+        summary=runner.run_pending()
+    assert len(calls)==1 and calls[0]==(repo,release.id)
+    if mode=='rate':
+        assert store.list_jobs()[0].state==S.RETRY_WAIT and store.list_jobs()[0].last_error_code==code
+        assert store.cooldown_until()==117 and summary.retry_wait==1
+    else: assert all(j.last_error_code==code for j in store.list_jobs())
+    assert summary.completed==(36 if mode=='ok' else 0)
+
+
+def test_gitlab_runner_default_resolve_budget(tmp_path,monkeypatch):
+    from test_gitlab import Wire, TARGET
+    import covearchive.gitlab as gl
+    wire=Wire(); wire.releases[0]['assets']['links']=[dict(wire.releases[0]['assets']['links'][0],id=i+1) for i in range(36)]
+    repo=replace(TARGET,project_id=34675721); release=wire.client().resolve_release(repo,'v1.130.0'); wire.calls.clear()
+    store=QueueStore(tmp_path/'g.db'); store.enqueue_many((repo,release,a,str(tmp_path)) for a in release.assets)
+    monkeypatch.setattr(gl,'GitLabReleaseClient',lambda:wire.client())
+    with QueueRunner(store,archive=lambda *a,**k:result()) as runner: assert runner.run_pending().completed==36
+    assert len(wire.calls)==4
+
+
+def test_gitlab_cached_resolve_refreshes_for_new_job(tmp_path):
+    from test_gitlab import Wire, TARGET
+    from types import SimpleNamespace
+    source=Wire().client().discover_releases(TARGET); repo=source.repository; release=source.releases[0]; calls=[]; now=[100]
+    store=QueueStore(tmp_path/'refresh.db')
+    with QueueRunner(store,resolve=lambda *a:(calls.append(1) or release),clock=lambda:now[0]) as runner:
+        runner._metadata(repo,tag=release.id); now[0]=101
+        job=SimpleNamespace(release_key=release.id,asset_id=release.assets[0].id,file_id=release.assets[0].file_id,asset_size=release.assets[0].size,created_at=101)
+        runner._lookup(repo,job); runner._lookup(repo,job)
+    assert len(calls)==2
+
+
+def test_gitlab_cache_separates_project_ids(tmp_path):
+    from test_gitlab import Wire, TARGET
+    source=Wire().client().discover_releases(TARGET); release=source.releases[0]
+    assets=tuple(replace(release.assets[0],id=i+1) for i in range(36)); release=replace(release,assets=assets)
+    old=replace(source.repository,project_id=5); new=replace(old,project_id=6); calls=[]; archived=[]
+    store=QueueStore(tmp_path/'projects.db',clock=lambda:100)
+    bad=store.enqueue(old,release,assets[0],str(tmp_path)).job
+    store.enqueue_many((new,release,a,str(tmp_path)) for a in assets)
+    def resolve(repo,tag):
+        calls.append((repo.project_id,tag))
+        if repo.project_id==5: raise g.GitHubApiError(code='repository_mismatch')
+        return release
+    with QueueRunner(store,resolve=resolve,archive=lambda repo,*a,**k:(archived.append(repo.project_id) or result()),clock=lambda:100) as runner:
+        summary=runner.run_pending()
+    assert summary.failed==1 and summary.completed==36
+    assert store.get(bad.job_id).last_error_code=='repository_mismatch'
+    assert calls==[(5,release.id),(6,release.id)] and archived==[6]*36

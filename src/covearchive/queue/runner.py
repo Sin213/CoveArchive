@@ -61,6 +61,11 @@ def _catalog(repository):
         from covearchive.github.client import GitHubReleaseClient as Client
     with Client() as client: return client.discover_releases(repository)
 
+def _resolve(repository,tag):
+    from covearchive.gitlab import GitLabReleaseClient
+    with GitLabReleaseClient() as client: return client.resolve_release(repository,tag)
+
+
 def _catalog_error(exc):
     from covearchive.github import client as g
     if isinstance(exc,g.IncompleteScanError):
@@ -68,34 +73,44 @@ def _catalog_error(exc):
     if isinstance(exc,g.RateLimitError): return Outcome('retry','rate_limited',exc.retry_after_seconds)
     if isinstance(exc,g.TransientServerError): return Outcome('retry' if exc.status in (500,502,503,504) else 'failed','server_error')
     if isinstance(exc,(g.RequestTimeoutError,g.NetworkError)): return Outcome('retry',safe_code(exc.code))
+    if isinstance(exc,g.NotFoundError) and exc.code=='release_removed': return Outcome('failed','release_removed')
     if isinstance(exc,g.NotFoundError): return Outcome('failed','upstream_removed')
     return Outcome('failed',safe_code(exc.code) if isinstance(exc,g.GitHubApiError) else 'internal_error')
 
 class QueueRunner:
-    def __init__(self,store,*,settings=None,archive=None,catalog=None,policy=None,clock=time.time,
+    def __init__(self,store,*,settings=None,archive=None,catalog=None,resolve=None,policy=None,clock=time.time,
             monotonic=time.monotonic,sleep=time.sleep,rng=random.random):
         self.store=store; self.settings=settings or store.settings
-        self.archive=archive; self.catalog=catalog or _catalog; self.policy=policy
+        self.archive=archive; self.catalog=catalog or _catalog; self.resolve=resolve or _resolve; self.policy=policy
         self.clock=clock; self.monotonic=monotonic; self.sleep=sleep; self.rng=rng
         self._owner=uuid.uuid4().hex; self._state=threading.RLock(); self._wake=threading.Event()
         self._active={}; self._cache={}; self._catalog_locks={}; self._lock=None
         self._running=False; self._stopping=False; self._closed=False; self._error=None
         self._serial=0; self._totals={s:0 for s in S}
 
-    def _metadata(self,repository,refresh_before=None):
-        with self._state: lock=self._catalog_locks.setdefault(repository.repo_key,threading.Lock())
+    def _metadata(self,repository,refresh_before=None,*,tag=None):
+        key=repository.repo_key if tag is None else (repository.repo_key,repository.project_id,tag)
+        with self._state: lock=self._catalog_locks.setdefault(key,threading.Lock())
         with lock:
             self._guard_cooldown()
-            value=self._cache.get(repository.repo_key); now=self.clock()
+            value=self._cache.get(key); now=self.clock()
             expired=value is not None and value[1] is not None and value[1].kind=='retry' and now>=value[3]+(value[1].retry_after_seconds or self.settings.retry_base_seconds)
             stale=value is not None and refresh_before is not None and value[2]<refresh_before
             if value is None or expired or stale:
-                try: value=(self.catalog(repository),None)
+                try: value=(self.catalog(repository) if tag is None else self.resolve(repository,tag),None)
                 except Exception as exc: value=(None,_catalog_error(exc))
-                self._cache[repository.repo_key]=(*value,now,self.clock())
-            return self._cache[repository.repo_key][:3]
+                self._cache[key]=(*value,now,self.clock())
+            return self._cache[key][:3]
 
     def _lookup(self,repository,job):
+        if repository.provider=='gitlab':
+            release,outcome,_=self._metadata(repository,refresh_before=job.created_at,tag=job.release_key)
+            if outcome is not None: return None,None,outcome
+            if release is None: return None,None,Outcome('failed','release_removed')
+            asset=next((a for a in release.assets if a.id==job.asset_id),None)
+            code=('asset_unavailable' if asset is None else
+                  'asset_changed' if release.id!=job.release_key or asset.state!='uploaded' or asset.file_id!=job.file_id or asset.size!=job.asset_size else None)
+            return release,asset,Outcome('failed',code) if code else None
         catalog,outcome,fetched_at=self._metadata(repository)
         for attempt in range(2):
             if outcome is not None: return None,None,outcome
@@ -128,7 +143,7 @@ class QueueRunner:
                 limit=min(self.settings.max_attempts,LIMITED_RETRY.get(job.last_error_code,self.settings.max_attempts))
                 if job.retry_count>=limit: outcome=Outcome('failed',job.last_error_code or 'retry_exhausted')
                 else:
-                    repository=RepositoryTarget(job.owner,job.repo,job.provider,job.host)
+                    repository=RepositoryTarget(job.owner,job.repo,job.provider,job.host,job.project_id)
                     release,asset,outcome=self._lookup(repository,job)
                     if outcome is None:
                         if not self._cancelled(control):

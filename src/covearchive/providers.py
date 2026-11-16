@@ -10,7 +10,7 @@ from covearchive.github.urls import (
 
 _OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,38}[A-Za-z0-9])?")
 _REPO = re.compile(r"[A-Za-z0-9._-]{1,100}")
-_HOSTS = {"github": "github.com", "codeberg": "codeberg.org"}
+_HOSTS = {"github": "github.com", "codeberg": "codeberg.org", "gitlab": "gitlab.com"}
 
 
 class RepositoryUrlError(GitHubUrlError):
@@ -22,7 +22,7 @@ class RepositoryUrlError(GitHubUrlError):
 
 
 def parse_repository_url(text: str) -> RepositoryTarget | ReleaseListTarget | ReleaseTagTarget:
-    """Dispatch GitHub URLs unchanged; accept Codeberg repository/release lists."""
+    """Dispatch GitHub URLs unchanged; accept Codeberg and GitLab release lists."""
     if not isinstance(text, str):
         raise TypeError("Repository URL must be a string.")
     text = text.strip(" \t\n\r\f\v")
@@ -38,7 +38,7 @@ def parse_repository_url(text: str) -> RepositoryTarget | ReleaseListTarget | Re
     lowered = text.translate(_ASCII_LOWER)
     if lowered.startswith("https://"):
         rest = text[len("https://"):]
-    elif lowered.startswith(("github.com/", "www.github.com/", "codeberg.org/")):
+    elif lowered.startswith(("github.com/", "www.github.com/", "codeberg.org/", "gitlab.com/")):
         rest = text
     else:
         raise RepositoryUrlError("scheme")
@@ -59,6 +59,20 @@ def parse_repository_url(text: str) -> RepositoryTarget | ReleaseListTarget | Re
         raise RepositoryUrlError("host")
     if host in ("github.com", "www.github.com"):
         return parse_github_url(text)
+    if host == "gitlab.com":
+        path = re.split(r"[?#]", rest[authority_end:], maxsplit=1)[0]
+        segments = path.removesuffix("/")[1:].split("/") if path.startswith("/") else []
+        if "-" in segments and segments.index("-") >= 2 and segments[segments.index("-"):] != ["-", "releases"]:
+            raise RepositoryUrlError("unsupported")
+        releases = segments[-2:] == ["-", "releases"]
+        if releases:
+            segments = segments[:-2]
+        if not 2 <= len(segments) <= 21 or any(
+                re.fullmatch(r"[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254}", s) is None
+                or s in (".", "..") or s.casefold().endswith((".git", ".atom")) for s in segments):
+            raise RepositoryUrlError("path")
+        kind = ReleaseListTarget if releases else RepositoryTarget
+        return kind("/".join(segments[:-1]), segments[-1], "gitlab", host)
     if host != "codeberg.org":
         raise RepositoryUrlError("host")
 
@@ -96,10 +110,14 @@ def validate_repository(repository: RepositoryTarget) -> RepositoryTarget:
         raise RepositoryUrlError("owner")
     if not isinstance(repository.repo, str):
         raise RepositoryUrlError("repo")
-    canonical = parse_repository_url(f"https://{repository.host}/{repository.owner}/{repository.repo}")
-    if not isinstance(canonical, RepositoryTarget) or canonical != repository:
+    if repository.project_id is not None and (
+            repository.provider != "gitlab" or type(repository.project_id) is not int
+            or not 1 <= repository.project_id <= 2**63 - 1):
         raise RepositoryUrlError("path")
-    return canonical
+    canonical = parse_repository_url(f"https://{repository.host}/{repository.owner}/{repository.repo}")
+    if not isinstance(canonical, RepositoryTarget) or (canonical.owner, canonical.repo, canonical.provider, canonical.host) != (repository.owner, repository.repo, repository.provider, repository.host):
+        raise RepositoryUrlError("path")
+    return repository
 
 
 def canonical_url(repository: RepositoryTarget) -> str:
@@ -112,6 +130,8 @@ def display_name(provider: str) -> str:
         return "GitHub"
     if provider == "codeberg":
         return "Codeberg"
+    if provider == "gitlab":
+        return "GitLab"
     raise RepositoryUrlError("unsupported")
 
 
@@ -119,4 +139,4 @@ def project_components(repository: RepositoryTarget) -> tuple[str, ...]:
     repository = validate_repository(repository)
     if repository.provider == "github":
         return repository.owner, repository.repo
-    return repository.host, repository.owner, repository.repo
+    return (repository.host, *repository.owner.split("/"), repository.repo)
