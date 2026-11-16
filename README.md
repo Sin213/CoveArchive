@@ -453,3 +453,34 @@ release tag and numeric project ID are retained in metadata.
 GitLab archives use manifest schema v3; GitHub v1 and Codeberg v2 stay unchanged.
 The queue uses schema v3; older builds refuse to open a v3 queue.
 Save Rules and Auto-Archive remain available for GitHub repositories only.
+
+## Git history (optional, manual)
+
+After scanning a public GitHub, Codeberg or GitLab.com repository, choose an existing
+archive root and click **Archive Git History**. Git 2.45 or newer is required.
+No authentication, tokens, private repositories or self-hosted forges are supported;
+redirects are rejected, so scan the new canonical URL after a rename or move.
+History never starts automatically. A full UI redesign is a later milestone.
+
+Each change creates a self-contained full bundle under the existing project folder:
+`git-history/snapshot-<UTC timestamp>--<refs digest>/history.bundle`, with `history.json`
+written last. The manifest records repository identity, canonical source URL, UTC time,
+Git version, HEAD, sorted branch/tag refs, refs digest, bundle size and SHA-256.
+An unchanged check verifies the latest matching bundle locally without re-downloading.
+Snapshots are never pruned or overwritten; storage grows with every full snapshot.
+You may delete old snapshots manually after deciding which history to retain.
+
+Restore offline with `git clone <path>\history.bundle <dir>`, then inspect with
+`git -C <dir> log --all` (add `--ref-format=reftable` to clone for Windows ref-name collisions).
+The default branch is recorded as `head` in `history.json` (a full `refs/heads/...` name).
+When branches share a tip, use `git clone --branch <name> <bundle> <dir>`
+to select that branch explicitly.
+Run `git -C <dir> bundle verify <absolute-bundle-path>`
+to verify a bundle in a Git repository. Only branches, tags and the fetched HEAD
+are preserved, not pull-request or merge-request refs. Git history does **NOT**
+include Git LFS file contents or submodule repository contents unless separately archived.
+
+Operations have deadlines, cancellation, bounded output, a 20,000-ref limit, an 8 GiB
+working-size limit and free-disk checks. Cancellation stops the process tree and cleans
+temporary files; once final manifest publication begins, the operation completes.
+The app does not check out repository content or run its hooks, submodules or LFS filters.

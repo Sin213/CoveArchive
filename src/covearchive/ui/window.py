@@ -26,6 +26,7 @@ from covearchive.providers import parse_repository_url, canonical_url, display_n
 from covearchive.scan_worker import ProtocolError, ScanFailure
 from covearchive.ui.scan_process import ScanController
 from covearchive.ui.auto_archive import AutoArchive
+from covearchive.ui.git_history import HistoryController, ERRORS, STAGES, result_text
 
 
 from covearchive.ui.queue_panel import display, size_text, state_text, QueuePanel, _error
@@ -126,6 +127,7 @@ class MainWindow(QMainWindow):
         self.auto=AutoArchive(auto_scan if auto_scan is not None else ScanController(launcher,parent=self),self.bridge,
             lambda:self.library_panel.library,lambda:self.preferences.load()[0],clock=auto_clock,parent=self)
         self.enqueue_token=0; self.last_view=None; self._close_status=None; self._window_closed=False
+        self.history_controller=HistoryController(self); self._history_closing=False; self._history_cancelling=False; self._history_pending=False
         central = QWidget(); self.tabs=QTabWidget(); self.setCentralWidget(self.tabs); self.tabs.addTab(central,"Browse"); layout = QVBoxLayout(central); layout.setSpacing(4); layout.setContentsMargins(8,8,8,8)
         layout.addWidget(QLabel("CoveArchive - part of the Cove Nexus family"))
         row = QHBoxLayout(); layout.addLayout(row)
@@ -151,6 +153,18 @@ class MainWindow(QMainWindow):
         self.root.textChanged.connect(self._destination); self.root.returnPressed.connect(self._destination); self.browse.clicked.connect(self._browse)
         selection_row=QHBoxLayout(); layout.addLayout(selection_row); self.select_matching=QPushButton("Select Matching"); self.clear_selection=QPushButton("Clear Selection"); self.archive_selected=QPushButton("Archive Selected (0)"); self.archive_selected.setEnabled(False)
         for button in (self.select_matching,self.clear_selection,self.archive_selected): selection_row.addWidget(button)
+        self.history_button=QPushButton("Archive Git History"); self.history_cancel=QPushButton("Cancel Git History")
+        self.history_button.setEnabled(False); self.history_cancel.setEnabled(False)
+        for button in (self.history_button,self.history_cancel):
+            selection_row.addWidget(button); button.setAccessibleName(button.text())
+        description="Archive public commits, branches and tags only; NOT Git LFS file contents or submodule repository contents."
+        self.history_button.setToolTip(description); self.history_button.setAccessibleDescription(description)
+        self.history_cancel.setToolTip("Stop the running Git history archive"); self.history_cancel.setAccessibleDescription(self.history_cancel.toolTip())
+        self.history_status=OptionalLabel(); self.history_status.setTextFormat(Qt.PlainText); self.history_status.setWordWrap(True); layout.addWidget(self.history_status)
+        self.history_button.clicked.connect(self._archive_history); self.history_cancel.clicked.connect(self._cancel_history)
+        self.history_controller.progress.connect(self._history_progress,Qt.QueuedConnection)
+        self.history_controller.finished.connect(self._history_finished,Qt.QueuedConnection)
+        self.history_controller.failed.connect(self._history_failed,Qt.QueuedConnection)
         self.select_matching.clicked.connect(lambda:self._select(False)); self.clear_selection.clicked.connect(lambda:self._select(True))
         for widget,name in ((self.include,"Include filename patterns"),(self.exclude,"Exclude filename patterns"),(self.root,"Archive root"),(self.browse,"Browse archive root"),(self.save_rules,"Save rules for this repository"),(self.select_matching,"Select Matching"),(self.clear_selection,"Clear Selection"),(self.archive_selected,"Archive Selected")):
             widget.setAccessibleName(name); widget.setAccessibleDescription(name)
@@ -166,7 +180,7 @@ class MainWindow(QMainWindow):
         self.busy = QProgressBar(); self.busy.setRange(0,0); self.busy.setVisible(False); layout.addWidget(self.busy)
         self.elapsed = QLabel(); self.elapsed.setTextFormat(Qt.PlainText); self.elapsed.hide(); layout.addWidget(self.elapsed)
         self.clock = QTimer(self); self.clock.setInterval(250); self.clock.timeout.connect(self._tick)
-        controls = [self.url,self.scan,self.cancel,self.prereleases,*self.formats.values(),self.include,self.exclude,self.save_rules,self.root,self.browse,self.select_matching,self.clear_selection,self.archive_selected,self.tree]
+        controls = [self.url,self.scan,self.cancel,self.prereleases,*self.formats.values(),self.include,self.exclude,self.save_rules,self.root,self.browse,self.select_matching,self.clear_selection,self.archive_selected,self.history_button,self.history_cancel,self.tree]
         for widget,name in zip(controls[:4],("GitHub URL","Scan","Cancel Scan","Include prereleases")):
             widget.setAccessibleName(name)
         self.tree.setAccessibleName("Releases and assets")
@@ -198,6 +212,41 @@ class MainWindow(QMainWindow):
         window=self.settings["window"]; self.resize(window["width"],window["height"]); self.tabs.setCurrentIndex(window["tab"]=="queue")
         self.url.setFocus()
         self.auto.start()
+        self._history_enabled()
+
+    def _history_enabled(self):
+        try: validate_root(self.root.text()); valid=True
+        except ValueError: valid=False
+        active=self._history_pending or self.history_controller.running
+        self.history_button.setEnabled(bool(self.catalog) and valid and not active and not self.bridge.shutting_down and not self.bridge.closed and not self._history_closing)
+        self.history_cancel.setEnabled(active and not self._history_closing and not self._history_cancelling)
+
+    def _archive_history(self):
+        self._history_enabled()
+        if not self.history_button.isEnabled(): return
+        self._history_cancelling=False
+        if self.history_controller.start(self.catalog.repository,str(Path(self.root.text()))):
+            self._history_pending=True; self.history_status.setText("Archiving Git history..."); self._history_enabled()
+
+    def _cancel_history(self):
+        self._history_cancelling=True; self.history_controller.cancel()
+        self.history_status.setText("Cancelling Git history..."); self._history_enabled()
+
+    def _history_progress(self,stage):
+        if not self._history_closing and not self._history_cancelling: self.history_status.setText(STAGES.get(stage,"Archiving Git history..."))
+
+    def _history_finished(self,result):
+        self.history_status.setText(result_text(result)); self._history_terminal()
+
+    def _history_failed(self,error):
+        text=ERRORS.get(error.code,ERRORS["internal_error"])
+        self.history_status.setText(text if text.startswith("Git history") else "Git history: "+text); self._history_terminal()
+
+    def _history_terminal(self):
+        if self.history_controller.running:
+            QTimer.singleShot(10,self._history_terminal); return
+        self._history_pending=False; self._history_cancelling=False; self.history_controller.shutdown(); self._history_enabled()
+        if self._history_closing: self.close()
 
     def _protected_roots(self):
         try: queue_dir = default_queue_path().parent
@@ -253,6 +302,7 @@ class MainWindow(QMainWindow):
     def _state(self, request_id, state):
         if self._window_closed: return
         if state == "RUNNING":
+            if not self._history_pending and not self.history_controller.running: self.history_status.clear()
             self.active_id=request_id; self.enqueue_token+=1; self.enqueue_pending=False; self.checked.clear(); self._clear(); self.started=time.monotonic()
         elif request_id != self.active_id: return
         running = state == "RUNNING"
@@ -272,6 +322,7 @@ class MainWindow(QMainWindow):
         self.url.setEnabled(True); self.scan.setEnabled(True); self.cancel.setEnabled(False)
         self.url.setFocus()
         if state == "COMPLETED":
+            if not self._history_pending and not self.history_controller.running: self.history_status.clear()
             self.catalog=result.catalog; key=self.catalog.repository.repo_key; github=self.catalog.repository.provider=='github'
             saved=self.settings["repositories"].get(key) if github else None
             if saved or self._rules_repo not in (None,key) or not github:
@@ -366,6 +417,7 @@ class MainWindow(QMainWindow):
         if path: self.root.setText(path)
 
     def _destination(self):
+        if hasattr(self,"history_button"): self._history_enabled()
         try:
             validate_root(self.root.text()); root=Path(self.root.text())
             if not self.catalog or not self.tree.model().rows: self.destination.setText(str(root)); return
@@ -400,6 +452,7 @@ class MainWindow(QMainWindow):
     def _queue_view(self,view):
         if self._window_closed or (self.last_view and view.seq<self.last_view.seq): return
         self.last_view=view
+        self._history_enabled()
 
     def _confirm_close(self):
         dialog=QMessageBox(self); dialog.setWindowTitle("Close CoveArchive?")
@@ -409,6 +462,7 @@ class MainWindow(QMainWindow):
 
     def _shutdown_status(self,status):
         if self._window_closed: return
+        self._history_enabled()
         self._close_status=status; count=len(status.unresolved)
         text=(f"Still active: {count} job(s) remain; the window will close when they finish" if status.phase=="timeout_waiting" else f"Stopping: waiting for {count} job(s) (catalog discovery and final file operations cannot be interrupted)")
         if status.phase=="timeout_waiting" and not count: text="Finishing up...; the window will close automatically when done"
@@ -420,6 +474,11 @@ class MainWindow(QMainWindow):
             self.close()
 
     def closeEvent(self,event):
+        if self._history_pending or self.history_controller.running:
+            self._history_closing=True; self.history_controller.cancel()
+            self.history_status.setText("Stopping Git history before closing...")
+            self._history_enabled(); event.ignore(); return
+        self.history_controller.shutdown()
         if not self.controller.shutdown(): event.ignore(); return
         if self.bridge.closed:
             if not self.auto.shutdown(): event.ignore(); return
@@ -435,7 +494,8 @@ class MainWindow(QMainWindow):
             if self._close_status: self._shutdown_status(self._close_status)
             return
         active=self.bridge.run_active or (self.last_view and any(j.owned and j.state.value=="RUNNING" for j in self.last_view.jobs))
-        if active and self._confirm_close()!="Pause and Close": return
+        if active and self._confirm_close()!="Pause and Close":
+            self._history_closing=False; self._history_enabled(); return
         if not self.auto.shutdown(): return
         self.archive_selected.setEnabled(False); self.queue_panel.start.setEnabled(False); self.bridge.begin_shutdown(True)
 
