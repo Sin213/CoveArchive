@@ -11,6 +11,7 @@ import time
 from PySide6.QtCore import QObject, Signal, QTimer, Qt, Slot
 from covearchive.github.models import Release, ReleaseAsset
 from covearchive.github.urls import RepositoryTarget
+from covearchive.providers import project_components
 from covearchive.queue.models import JobState, QueueError, InvalidTransitionError, QueueSettings, safe_code
 from covearchive.queue.runner import QueueRunner, RunSummary
 from covearchive.queue.store import QueueStore
@@ -193,7 +194,7 @@ class ArchiveBridge(QObject):
                 counts[job.state] += 1
                 if job.state != JobState.RUNNING or job.job_id not in active: self._pending.pop(job.job_id, None)
                 progress = active.get(job.job_id) if job.state == JobState.RUNNING else None
-                rows.append(JobView(job.job_id, _text(job.owner + "/" + job.repo), _text(job.tag_name),
+                rows.append(JobView(job.job_id, _text('/'.join(project_components(RepositoryTarget(job.owner,job.repo,job.provider,job.host)))), _text(job.tag_name),
                     _text(job.asset_name), job.asset_size, job.state, job.retry_count,
                     safe_code(job.last_error_code) if job.last_error_code else None, job.next_attempt_at,
                     job.result_status, job.integrity, job.transferred, progress is not None,

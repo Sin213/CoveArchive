@@ -344,3 +344,27 @@ def test_error_code_is_read_only_and_message_never_echoes_input(code):
 def test_unknown_error_codes_raise_value_error(code):
     with pytest.raises(ValueError):
         GitHubUrlError(code)
+
+
+def test_repository_target_defaults_keep_github_identity():
+    target = RepositoryTarget("Alice", "Repo")
+    assert getattr(target, "provider", None) == "github"
+    assert getattr(target, "host", None) == "github.com"
+    assert target.repo_key == "alice/repo"
+
+
+@pytest.mark.parametrize("target_type", [RepositoryTarget, ReleaseListTarget])
+def test_provider_targets_separate_keys_equality_and_preserve_case(target_type):
+    github = target_type("ALIce", "REpo")
+    codeberg = target_type("ALIce", "REpo", "codeberg", "codeberg.org")
+    assert github != codeberg
+    assert github.repo_key == "alice/repo"
+    assert codeberg.repo_key == "codeberg.org/alice/repo"
+    assert codeberg.owner == "ALIce" and codeberg.repo == "REpo"
+    assert codeberg != target_type("ALIce", "REpo", "github", "codeberg.org")
+    assert codeberg != target_type("ALIce", "REpo", "codeberg", "other.org")
+    assert target_type("ALIce", "REpo", "codeberg", "CODEBERG.ORG").repo_key == codeberg.repo_key
+    with pytest.raises(FrozenInstanceError):
+        codeberg.provider = "github"
+    with pytest.raises(FrozenInstanceError):
+        codeberg.host = "github.com"

@@ -75,6 +75,7 @@ class QueueJob:
     transferred: bool | None
     created_at: float
     updated_at: float
+    host: str='github.com'
 
 @dataclass(frozen=True)
 class Enqueued:

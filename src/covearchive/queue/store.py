@@ -1,5 +1,6 @@
 """Durable jobs; short connections and transactional project exclusion."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+import hashlib
 from pathlib import Path
 import ntpath
 import os
@@ -11,20 +12,21 @@ import threading
 import time
 import uuid
 from covearchive.archive.naming import validate_root
-from covearchive.github.urls import RepositoryTarget, parse_github_url
+from covearchive.providers import validate_repository
 from .models import (JobState, TRANSITIONS, QueueError, QueueCorruptError, QueueVersionError,
     QueueBusyError, UnknownJobError, InvalidTransitionError, InvalidJobError, QueueSettings,
     QueueJob, Enqueued, safe_code)
 
 _WRITES=threading.RLock()
 APPLICATION_ID=0x43415131
-_SCHEMA="""CREATE TABLE jobs (
+_SCHEMA_V1="""CREATE TABLE jobs (
 seq INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT UNIQUE, identity TEXT UNIQUE,
 provider TEXT, owner TEXT, repo TEXT, repo_key TEXT, release_id INTEGER, asset_id INTEGER,
 archive_root TEXT, project_key TEXT, tag_name TEXT, asset_name TEXT, asset_size INTEGER,
 state TEXT CHECK(state IN ('QUEUED','RUNNING','PAUSED','RETRY_WAIT','COMPLETED','FAILED','CANCELLED')),
 retry_count INTEGER, last_error_code TEXT, next_attempt_at REAL, claimed_by TEXT, stop_requested TEXT,
 result_status TEXT, integrity TEXT, transferred INTEGER, created_at REAL, updated_at REAL)"""
+_SCHEMA=_SCHEMA_V1[:-1]+', host TEXT)'
 _COOLDOWNS='CREATE TABLE cooldowns (scope TEXT PRIMARY KEY, until REAL)'
 
 def default_queue_path():
@@ -58,18 +60,56 @@ class QueueStore:
                     missing.append(directory); directory=directory.parent
                 for directory in reversed(missing): directory.mkdir(mode=0o700,exist_ok=True)
         except OSError: raise QueueError('database_unavailable') from None
-        with self._write(initializing=True) as c:
+        # Inspect the SQLite header without opening a writer before runner exclusion.
+        try:
+            header=b''
+            if self.path.is_file():
+                with self.path.open('rb') as source: header=source.read(72)
+        except OSError: raise QueueError('database_unavailable') from None
+        migrating=header[:16]==b'SQLite format 3\0' and int.from_bytes(header[60:64],'big')==1
+        try:
+            if migrating and self.path.stat().st_nlink!=1: raise OSError
+        except OSError: raise QueueError('database_unavailable') from None
+        with (RunnerLock(self.path) if migrating else nullcontext()), self._write(initializing=True) as c:
             version=c.execute('PRAGMA user_version').fetchone()[0]
             application=c.execute('PRAGMA application_id').fetchone()[0]
-            if version>1: raise QueueVersionError(self.path)
+            if version>2: raise QueueVersionError(self.path)
             schema=c.execute("SELECT name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
             if version==0 and application==0 and not schema:
                 c.execute('PRAGMA journal_mode=DELETE')
-                c.execute(_SCHEMA); c.execute(_COOLDOWNS); c.execute('PRAGMA user_version=1'); c.execute(f'PRAGMA application_id={APPLICATION_ID}')
-            elif (version!=1 or application!=APPLICATION_ID or [(r[0],r[1]) for r in schema]!=[('cooldowns',_COOLDOWNS),('jobs',_SCHEMA)]
-                    or c.execute('PRAGMA quick_check').fetchone()[0]!='ok'
-                    or c.execute('PRAGMA journal_mode').fetchone()[0]!='delete'):
-                raise QueueCorruptError(self.path)
+                c.execute(_SCHEMA); c.execute(_COOLDOWNS); c.execute('PRAGMA user_version=2'); c.execute(f'PRAGMA application_id={APPLICATION_ID}')
+            else:
+                self._check_schema(c,version)
+                if version==1:
+                    if not migrating: raise QueueBusyError('runner_active')
+                    self._migrate(c)
+                self._check_schema(c,2)
+
+    def _check_schema(self,c,version,*,full=True):
+        schema=c.execute("SELECT name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
+        if (version not in (1,2) or c.execute('PRAGMA application_id').fetchone()[0]!=APPLICATION_ID
+                or [(r[0],r[1]) for r in schema]!=[('cooldowns',_COOLDOWNS),('jobs',_SCHEMA_V1 if version==1 else _SCHEMA)]
+                or full and (c.execute('PRAGMA quick_check').fetchone()[0]!='ok'
+                    or c.execute('PRAGMA journal_mode').fetchone()[0]!='delete')):
+            raise QueueCorruptError(self.path)
+
+    def _migration_snapshot(self,c,columns):
+        rows=[tuple(r) for r in c.execute('SELECT '+columns+' FROM jobs ORDER BY seq')]
+        cooldowns=[tuple(r) for r in c.execute('SELECT * FROM cooldowns ORDER BY scope')]
+        return len(rows),hashlib.sha256(repr((rows,cooldowns)).encode()).digest()
+
+    def _migrate(self,c):
+        columns=','.join(r[1] for r in c.execute('PRAGMA table_info(jobs)'))
+        before=self._migration_snapshot(c,columns)
+        sequence=c.execute("SELECT seq FROM sqlite_sequence WHERE name='jobs'").fetchone()
+        c.execute('ALTER TABLE jobs RENAME TO jobs_v1'); c.execute(_SCHEMA)
+        c.execute('INSERT INTO jobs ('+columns+",host) SELECT "+columns+",'github.com' FROM jobs_v1 ORDER BY seq")
+        if self._migration_snapshot(c,columns)!=before: raise QueueCorruptError(self.path)
+        c.execute('DROP TABLE jobs_v1')
+        if sequence:
+            c.execute("DELETE FROM sqlite_sequence WHERE name='jobs'")
+            c.execute("INSERT INTO sqlite_sequence(name,seq) VALUES ('jobs',?)",(sequence[0],))
+        c.execute('PRAGMA user_version=2')
 
     @contextmanager
     def _connection(self):
@@ -99,9 +139,10 @@ class QueueStore:
             try:
                 if not initializing:
                     version=c.execute('PRAGMA user_version').fetchone()[0]
-                    if version>1: raise QueueVersionError(self.path)
-                    if version!=1 or c.execute('PRAGMA application_id').fetchone()[0]!=APPLICATION_ID:
+                    if version>2: raise QueueVersionError(self.path)
+                    if version!=2:
                         raise QueueCorruptError(self.path)
+                    self._check_schema(c,2,full=False)
                 yield c; c.commit()
             except BaseException: c.rollback(); raise
 
@@ -129,8 +170,7 @@ class QueueStore:
 
     def _validate(self,repository,release,asset,root):
         try:
-            if not isinstance(repository,RepositoryTarget) or parse_github_url(
-                    'https://github.com/'+repository.owner+'/'+repository.repo)!=repository: raise ValueError
+            validate_repository(repository)
             validate_root(root)
             root_key=(ntpath.normpath(str(root).replace('/','\\')).casefold()
                       if sys.platform == 'win32' else str(root))
@@ -141,9 +181,9 @@ class QueueStore:
                     or any(not isinstance(s,str) or not 1<=len(s)<=1024 for s in (asset.name,release.tag_name))): raise ValueError
         except (ValueError,TypeError,AttributeError): raise InvalidJobError('invalid_job') from None
         key=repository.repo_key; project=root_key+'|'+key
-        return ('github|'+key+'|'+str(release.id)+'|'+str(asset.id)+'|'+root_key,
-            'github',repository.owner,repository.repo,key,release.id,asset.id,str(root),project,
-            _display(release.tag_name),_display(asset.name),asset.size)
+        return (repository.provider+'|'+key+'|'+str(release.id)+'|'+str(asset.id)+'|'+root_key,
+            repository.provider,repository.owner,repository.repo,key,release.id,asset.id,str(root),project,
+            _display(release.tag_name),_display(asset.name),asset.size,repository.host)
 
     def enqueue(self,repository,release,asset,archive_root):
         return self.enqueue_many(((repository,release,asset,archive_root),))[0]
@@ -160,7 +200,7 @@ class QueueStore:
                         outcome='requeued'
                     result.append(Enqueued(self._get(c,old['job_id']),outcome)); continue
                 job_id=uuid.uuid4().hex; now=self.clock()
-                c.execute("INSERT INTO jobs (job_id,identity,provider,owner,repo,repo_key,release_id,asset_id,archive_root,project_key,tag_name,asset_name,asset_size,state,retry_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'QUEUED',0,?,?)",(job_id,*value,now,now))
+                c.execute("INSERT INTO jobs (job_id,identity,provider,owner,repo,repo_key,release_id,asset_id,archive_root,project_key,tag_name,asset_name,asset_size,host,state,retry_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'QUEUED',0,?,?)",(job_id,*value,now,now))
                 result.append(Enqueued(self._get(c,job_id),'created'))
         return tuple(result)
 
@@ -175,6 +215,7 @@ class QueueStore:
             return self._get(c,row[0])
 
     def cooldown_until(self):
+        # Legacy 'github' scope remains a conservative queue-wide cooldown for both providers.
         with self._connection() as c:
             row=c.execute("SELECT until FROM cooldowns WHERE scope='github'").fetchone()
             return row[0] if row else None
@@ -226,6 +267,7 @@ class QueueStore:
 
 class RunnerLock:
     def __init__(self,path):
+        path=os.path.realpath(path)
         if sys.platform != 'win32':
             import fcntl
             self._file=None

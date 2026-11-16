@@ -77,6 +77,19 @@ def rig(tmp_path):
     app.processEvents()
 
 
+@pytest.mark.parametrize('isolated',[None])
+def test_provider_portable_bridge_label(isolated):
+    from test_queue_store import memory_store
+    store,c=memory_store(); repo,release,asset,root=item(); views=[]
+    try:
+        store.enqueue_many([(r,release,asset,root) for r in (repo,replace(repo,provider='codeberg',host='codeberg.org'))])
+        snapshot=NS(active=(),bytes_done=0,bytes_total=84,cooldown_until=None)
+        bridge=NS(_seq=0,is_open=True,_runner=NS(snapshot=lambda:snapshot),_store=store,_pending={},_problem=None,_run_problem=None,_run_state=lambda:'idle',_emit=lambda signal,view:views.append(view),view_changed=None)
+        ArchiveBridge._publish(bridge)
+        assert [j.repository for j in views[0].jobs]==['Owner/Repo','codeberg.org/Owner/Repo']
+    finally: c.close()
+
+
 def request(token=1, root=native_root("C:/Archive")):
     repo,r,a,_=item()
     return EnqueueRequest(token,repo,root,(EnqueueItem(r,a),))
@@ -186,7 +199,7 @@ def test_unavailable_queue_preserves_bytes_and_never_reopens(tmp_path,rig,kind,m
     if kind=="corrupt": path.write_bytes(b"corrupt queue")
     else:
         QueueStore(path)
-        with sqlite3.connect(path) as db: db.execute("pragma user_version=2")
+        with sqlite3.connect(path) as db: db.execute("pragma user_version=3")
     original=path.read_bytes(); bridge,sink=rig()
     assert not bridge.is_open and not sink.views[-1].usable and sink.views[-1].problem and not sink.views[-1].jobs
     assert not bridge.enqueue(request())

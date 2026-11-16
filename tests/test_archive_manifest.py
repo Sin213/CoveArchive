@@ -3,6 +3,7 @@
 from dataclasses import FrozenInstanceError, asdict, replace
 from itertools import product
 import json
+import hashlib
 from urllib.parse import quote
 
 import pytest
@@ -149,7 +150,7 @@ def test_M10_exact_json_order_roundtrip_and_ascii(release):
     assert "\\u00e9" in dump(unicode_value) and "\u00e9" not in dump(unicode_value)
 
 
-@pytest.mark.parametrize("version", [0, 2, -1, True, "1", None, 1.0])
+@pytest.mark.parametrize("version", [0, 3, -1, True, "1", None, 1.0])
 @pytest.mark.parametrize("release", [False, True])
 def test_M11_unsupported_versions_never_downgraded(version, release):
     data = document(release)
@@ -301,3 +302,27 @@ def test_R4_manifest_cap_derivation():
     worst = asset(original_name="\U0001f600" * 1024, saved_name="\U0001f600" * 60,
                   size=m.MAX_SIZE, status="completed", publisher_sha256=HASH, local_sha256=HASH)
     assert m.MAX_ASSETS_PER_RELEASE * len(json.dumps(asdict(worst), indent=2, ensure_ascii=True)) + 3 * 1024 * 12 + 4096 <= m.MAX_MANIFEST_BYTES
+
+
+@pytest.mark.parametrize('release_doc,expected',[(False,'3993afabd2b82fa35336863006268ad8bb17c7c1dd8d3fe4c89e99c218e7270c'),(True,'443f3011166f2a7385f5cf0b56a327a0809918e1239baa020b1d5e743c86a458')])
+def test_provider_manifest_versions_and_pinned_github_bytes(release_doc,expected,monkeypatch):
+    dump,load=(m.dumps_release_manifest,m.loads_release_manifest) if release_doc else (m.dumps_index,m.loads_index)
+    original=manifest() if release_doc else m.ProjectIndex(REPO,(record(),))
+    assert hashlib.sha256(dump(original).encode()).hexdigest()==expected
+    repo=RepositoryTarget('Owner','Repo','codeberg','codeberg.org')
+    value=replace(original,repository=repo,**({'source_url':'https://codeberg.org/Owner/Repo/releases/tag/v1'} if release_doc else {}))
+    data=json.loads(dump(value)); assert data['schema_version']==2 and data['provider']=='codeberg'
+    assert data['repository']==dict(host='codeberg.org',owner='Owner',name='Repo',key='codeberg.org/owner/repo')
+    assert load(dump(value))==value
+    if release_doc:
+        tagged=parse_release(dict(id=1,tag_name='v 1/a+#',draft=False,prerelease=False,created_at='2026-11-13',assets=[]))
+        assert m.build_release_manifest(repo,tagged,record(tag=tagged.tag_name)).source_url=='https://codeberg.org/Owner/Repo/releases/tag/v%201/a%2B%23'
+    monkeypatch.setattr(m,'MAX_SCHEMA_VERSION',1)
+    with pytest.raises(m.UnsupportedVersionError): load(dump(value))
+
+
+@pytest.mark.parametrize('version,provider,patch',[(1,'codeberg',{}),(1,'github',{'host':'github.com'}),(2,'github',{}),(2,'codeberg',{}),(2,'codeberg',{'host':'evil.com'}),(2,'codeberg',{'host':'codeberg.org','key':'owner/repo'})])
+@pytest.mark.parametrize('release_doc',[False,True])
+def test_provider_manifest_header_strict(version,provider,patch,release_doc):
+    data=document(release_doc); data.update(schema_version=version,provider=provider); data['repository'].update(patch)
+    with pytest.raises(m.ManifestError): (m.loads_release_manifest if release_doc else m.loads_index)(json.dumps(data))

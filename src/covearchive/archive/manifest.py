@@ -17,12 +17,14 @@ from urllib.parse import quote
 
 from covearchive.github.models import Release
 from covearchive.jsondepth import check_json_depth
-from covearchive.github.urls import GitHubUrlError, RepositoryTarget, parse_github_url
+from covearchive.github.urls import RepositoryTarget
+from covearchive.providers import canonical_url, validate_repository
 
 from .naming import RELEASE_FILENAME, is_release_folder, is_safe_component, name_key
 
 
 SCHEMA_VERSION = 1
+MAX_SCHEMA_VERSION = 2
 PROVIDER = "github"
 STATUS_PLANNED = "planned"
 STATUS_COMPLETED = "completed"
@@ -90,15 +92,10 @@ def _unique(values):
 
 
 def _repository(repository):
-    if not isinstance(repository, RepositoryTarget) or not all(
-            isinstance(v, str) for v in (repository.owner, repository.repo)):
-        raise ManifestError("identity")
     try:
-        target = parse_github_url(f"https://github.com/{repository.owner}/{repository.repo}")
-    except GitHubUrlError as exc:
+        validate_repository(repository)
+    except (ValueError, TypeError) as exc:
         raise ManifestError("identity") from exc
-    if target != repository:
-        raise ManifestError("identity")
 
 
 def _release_fields(record):
@@ -119,7 +116,7 @@ def _assets(items):
 
 def _source(repository, tag):
     try:
-        return f"https://github.com/{repository.owner}/{repository.repo}/releases/tag/" + quote(tag, safe="/")
+        return canonical_url(repository) + "/releases/tag/" + quote(tag, safe="/")
     except UnicodeError:
         return None
 
@@ -236,8 +233,10 @@ def _values(record, keys):
 
 
 def _header(repository):
-    return dict(schema_version=SCHEMA_VERSION, provider=PROVIDER,
-                repository=dict(owner=repository.owner, name=repository.repo, key=repository.repo_key))
+    identity = dict(owner=repository.owner, name=repository.repo, key=repository.repo_key)
+    if repository.provider == "codeberg":
+        return dict(schema_version=2, provider="codeberg", repository=dict(host=repository.host, **identity))
+    return dict(schema_version=SCHEMA_VERSION, provider=PROVIDER, repository=identity)
 
 
 def dumps_index(index: ProjectIndex) -> str:
@@ -291,17 +290,17 @@ def _parse(text, cap, keys):
         raise ManifestError("root")
     if "schema_version" not in data:
         raise ManifestError("field")
-    if type(data["schema_version"]) is not int or data["schema_version"] != SCHEMA_VERSION:
+    if type(data["schema_version"]) is not int or not 1 <= data["schema_version"] <= MAX_SCHEMA_VERSION:
         raise UnsupportedVersionError("version")
     _keys(data, keys)
-    if data["provider"] != PROVIDER:
+    if data["provider"] != (PROVIDER if data["schema_version"] == 1 else "codeberg"):
         raise ManifestError("field")
     return data
 
 
-def _load_repository(obj):
-    _keys(obj, ("owner", "name", "key"))
-    repository = RepositoryTarget(obj["owner"], obj["name"])
+def _load_repository(obj, provider=PROVIDER):
+    _keys(obj, ("owner", "name", "key") if provider == PROVIDER else ("host", "owner", "name", "key"))
+    repository = RepositoryTarget(obj["owner"], obj["name"], provider, obj.get("host", "github.com"))
     _repository(repository)
     if obj["key"] != repository.repo_key:
         raise ManifestError("identity")
@@ -314,7 +313,7 @@ def _load_assets(items):
 
 def loads_index(text: str) -> ProjectIndex:
     data = _parse(text, MAX_INDEX_BYTES, ("schema_version", "provider", "repository", "releases"))
-    repository = _load_repository(data["repository"])
+    repository = _load_repository(data["repository"], data["provider"])
     releases = _collection(data["releases"], MAX_RELEASES)
     if sum(len(_collection(_keys(r, _RECORD_KEYS)["assets"], MAX_ASSETS_PER_RELEASE)) for r in releases) > MAX_TOTAL_ASSETS:
         raise ManifestError("limit")
@@ -324,7 +323,7 @@ def loads_index(text: str) -> ProjectIndex:
 
 def loads_release_manifest(text: str) -> ReleaseManifest:
     data = _parse(text, MAX_MANIFEST_BYTES, ("schema_version", "provider", "repository", "release", "assets"))
-    return ReleaseManifest(repository=_load_repository(data["repository"]),
+    return ReleaseManifest(repository=_load_repository(data["repository"], data["provider"]),
         **_keys(data["release"], _RELEASE_KEYS), assets=_load_assets(data["assets"]))
 
 

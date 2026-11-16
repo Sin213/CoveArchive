@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import unicodedata
+from covearchive.providers import project_components as identity_components
 
 
 INDEX_FILENAME = "archive-index.json"
@@ -159,6 +160,11 @@ def project_folders(owner: str, repo: str) -> tuple[str, str]:
     return tuple(folders)
 
 
+def project_components(repository) -> tuple[str, ...]:
+    parts = identity_components(repository)
+    return parts[:-2] + project_folders(*parts[-2:])
+
+
 @dataclass(frozen=True)
 class AssetName:
     asset_id: int
@@ -227,28 +233,30 @@ def validate_root(root: str | PurePath) -> int:
 
 
 def filename_limit(root: str | PurePath, owner_dir: str, repo_dir: str,
-                   folder: str) -> int:
+                   folder: str, *, prefix=()) -> int:
+    parts = (*prefix, owner_dir, repo_dir, folder)
     if sys.platform != "win32":
-        prefix = validate_root(root) + sum(len(os.fsencode(c)) for c in (owner_dir, repo_dir, folder)) + 4
-        limit = min(MAX_COMPONENT_LENGTH, 255, 4095 - prefix)
+        used = validate_root(root) + sum(len(os.fsencode(c)) for c in parts) + len(parts) + 1
+        limit = min(MAX_COMPONENT_LENGTH, 255, 4095 - used)
         if limit < MIN_FILENAME_LENGTH:
             raise PathBudgetError("budget")
         return limit
-    prefix = validate_root(root) + sum(_units(c) for c in (owner_dir, repo_dir, folder)) + 4
-    limit = min(MAX_COMPONENT_LENGTH, MAX_PATH_BUDGET - prefix)
+    used = validate_root(root) + sum(_units(c) for c in parts) + len(parts) + 1
+    limit = min(MAX_COMPONENT_LENGTH, MAX_PATH_BUDGET - used)
     if limit < MIN_FILENAME_LENGTH:
         raise PathBudgetError("budget")
     return limit
 
 
 def check_path_budget(root: str | PurePath, owner_dir: str, repo_dir: str,
-                      folder: str, filename: str) -> None:
+                      folder: str, filename: str, *, prefix=()) -> None:
     root_length = validate_root(root)
+    parts = (*prefix, owner_dir, repo_dir, folder, filename)
     if sys.platform != "win32":
-        lengths = [len(os.fsencode(c)) for c in (owner_dir, repo_dir, folder, filename)]
-        if max(lengths) > 255 or root_length + sum(lengths) + 4 >= 4096:
+        lengths = [len(os.fsencode(c)) for c in parts]
+        if max(lengths) > 255 or root_length + sum(lengths) + len(parts) >= 4096:
             raise PathBudgetError("budget")
         return
-    lengths = [_units(c) for c in (owner_dir, repo_dir, folder, filename)]
-    if max(lengths) > MAX_COMPONENT_LENGTH or root_length + sum(lengths) + 4 > MAX_PATH_BUDGET:
+    lengths = [_units(c) for c in parts]
+    if max(lengths) > MAX_COMPONENT_LENGTH or root_length + sum(lengths) + len(parts) > MAX_PATH_BUDGET:
         raise PathBudgetError("budget")

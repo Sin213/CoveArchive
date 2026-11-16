@@ -17,7 +17,8 @@ import sys
 
 from covearchive.github.models import Release, ReleaseAsset, ReleaseCatalog
 from covearchive.github.select import ExcludedRelease, select_releases
-from covearchive.github.urls import GitHubUrlError, RepositoryTarget, parse_github_url
+from covearchive.github.urls import RepositoryTarget
+from covearchive.providers import validate_repository
 
 from . import naming
 from .manifest import AssetRecord, ManifestError, ProjectIndex, ReleaseManifest, ReleaseRecord, build_release_manifest
@@ -79,15 +80,10 @@ class ArchivePlan:
 
 
 def _repository_key(repository):
-    if not isinstance(repository, RepositoryTarget) or not all(
-            isinstance(v, str) for v in (repository.owner, repository.repo)):
-        raise PlanError("repository")
     try:
-        parsed = parse_github_url(f"https://github.com/{repository.owner}/{repository.repo}")
-    except GitHubUrlError as exc:
+        validate_repository(repository)
+    except (ValueError, TypeError) as exc:
         raise PlanError("repository") from exc
-    if parsed != repository:
-        raise PlanError("repository")
     return repository.repo_key
 
 
@@ -174,8 +170,9 @@ def _plan_archive(source, *, archive_root, repository, index, include_prerelease
         # Use a safe placeholder tag until the real constructor validates remote text.
         folder = recorded[r.id].folder if r.id in recorded else naming.release_folder_name("", r.id)
         ReleaseManifest(repository, r.id, r.tag_name, folder, None, None, False, None, ())
-    owner_dir, repo_dir = naming.project_folders(repository.owner, repository.repo)
-    project = (PureWindowsPath if sys.platform == "win32" else PurePosixPath)(owner_dir, repo_dir)
+    components = naming.project_components(repository)
+    owner_dir, repo_dir = components[-2:]
+    project = (PureWindowsPath if sys.platform == "win32" else PurePosixPath)(*components)
     releases, proposed = [], dict(recorded)
     for selected in selection.releases:
         release = selected.release
@@ -184,7 +181,7 @@ def _plan_archive(source, *, archive_root, repository, index, include_prerelease
         old_assets = {a.asset_id: a for a in old_release.assets} if old_release else {}
         names = {}
         if selected.matches:
-            limit = naming.filename_limit(archive_root, owner_dir, repo_dir, folder)
+            limit = naming.filename_limit(archive_root, owner_dir, repo_dir, folder, prefix=components[:-2])
             names = naming.allocate_asset_names(
                 {m.asset.id: m.asset.name for m in selected.matches if m.asset.id not in old_assets},
                 taken={i: a.saved_name for i, a in old_assets.items()}, limit=limit)
@@ -212,7 +209,7 @@ def _plan_archive(source, *, archive_root, repository, index, include_prerelease
                 changed = any(n in notes for n in ("name_changed", "size_changed", "digest_changed"))
                 state = "recorded"
                 action = "reconcile" if changed else "verify" if record.status == "completed" else "download"
-            naming.check_path_budget(archive_root, owner_dir, repo_dir, folder, record.saved_name)
+            naming.check_path_budget(archive_root, owner_dir, repo_dir, folder, record.saved_name, prefix=components[:-2])
             assets.append(AssetPlan(asset, match.extension, record, state, action,
                                     tuple(sorted(notes)), project / folder / record.saved_name))
         selected_ids = {m.asset.id for m in selected.matches}

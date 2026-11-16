@@ -52,6 +52,13 @@ def view(seq,jobs,problem=None): return QueueView(seq,tuple(jobs),((S.QUEUED,len
 
 def pump(): QApplication.processEvents(); QTest.qWait(1)
 
+@pytest.mark.parametrize('isolated',[None])
+def test_provider_portable_queue_row(isolated):
+    app=QApplication.instance() or QApplication([]); bridge=FakeBridge(); panel=QueuePanel(bridge)
+    bridge.view_changed.emit(view(1,(job(repository='codeberg.org/Owner/Repo'),))); pump()
+    assert panel.table.item(0,1).text()=='codeberg.org/Owner/Repo / v1'
+    panel.close(); panel.deleteLater(); pump()
+
 
 def test_selection_controls_stale_views_plain_text_and_accessibility():
     app=QApplication.instance() or QApplication([]); bridge=FakeBridge(); panel=QueuePanel(bridge)

@@ -24,6 +24,47 @@ def record(**changes):
     return replace(AssetRecord(1, "asset", "asset.bin", len(DATA), None, None, "planned"), **changes)
 
 
+def test_codeberg_component_chain_from_pinned_root():
+    from contextlib import contextmanager
+    calls=[]
+    class Directory:
+        @contextmanager
+        def open_dir(self,name,**options):
+            calls.append((self,name,options)); yield Directory()
+    root=Directory()
+    with store.ensure_project(root,RepositoryTarget('Owner','Repo','codeberg','codeberg.org')) as project:
+        assert project.role=='project' and calls[0][0] is root
+    assert [name for parent,name,options in calls]==['codeberg.org','Owner','Repo'] and len({id(parent) for parent,name,options in calls})==3
+    assert all(options==dict(create=True,fold_case=True) for parent,name,options in calls)
+
+
+@pytest.mark.parametrize('level',[0,1,2])
+@pytest.mark.parametrize('kind',[pytest.param('junction',marks=NTFS_JUNCTION),'symlink'])
+def test_codeberg_ancestor_links_refused(tmp_path,level,kind):
+    names=('codeberg.org','Owner','Repo'); link=tmp_path.joinpath(*names[:level+1]); link.parent.mkdir(parents=True,exist_ok=True)
+    target=tmp_path/'outside'; target.mkdir(); (target/'sentinel').write_bytes(DATA)
+    if kind=='junction': junction(link,target)
+    else:
+        try: os.symlink(target,link,target_is_directory=True)
+        except OSError as exc: pytest.skip(f'symlink creation unavailable: {exc}')
+    try:
+        with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+            with pytest.raises(winfs.ArchiveUnsafePathError,match='reparse_point' if sys.platform=='win32' else 'not_regular_file'):
+                with store.ensure_project(root,RepositoryTarget('Owner','Repo','codeberg','codeberg.org')): pass
+        assert list(target.iterdir())==[target/'sentinel'] and (target/'sentinel').read_bytes()==DATA
+    finally:
+        link.rmdir() if kind=='junction' else link.unlink()
+
+
+def test_codeberg_host_case_reused_without_github_collision(tmp_path):
+    (tmp_path/'CODEBERG.ORG'/'OWNER'/'REPO').mkdir(parents=True)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        for repository in (RepositoryTarget('Owner','Repo'),RepositoryTarget('Owner','Repo','codeberg','codeberg.org')):
+            with store.ensure_project(root,repository) as project: assert project.info().is_directory
+    assert (tmp_path/'Owner'/'Repo').is_dir() and (tmp_path/'CODEBERG.ORG'/'OWNER'/'REPO').is_dir()
+    assert sorted(p.name for p in tmp_path.iterdir())==['CODEBERG.ORG','Owner']
+
+
 def junction(link, target):
     result = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
                             capture_output=True, text=True, timeout=15)
@@ -535,7 +576,8 @@ def test_manifest_commit_races(tmp_path, monkeypatch, which, race):
                         assert path.with_suffix(".old").read_bytes() == raw
 
 
-@pytest.mark.parametrize("owner,repo", [("release.json", "repo"), ("owner", "release.json")])
+# A GitHub owner cannot contain '.', so release.json is reachable only as a repo.
+@pytest.mark.parametrize("owner,repo", [("owner", "release.json")])
 def test_role_specific_reservations(tmp_path, owner, repo):
     try:
         with winfs.ArchiveRoot.open(str(tmp_path)) as root:

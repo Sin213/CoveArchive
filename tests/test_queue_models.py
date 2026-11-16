@@ -30,3 +30,10 @@ def test_Q29_bad_code():
 
 def test_Q18_FB_limited_policy():
     assert getattr(m,'LIMITED_RETRY',{})=={'manifest_commit_incomplete':2}
+
+def test_provider_job_default_host():
+    from covearchive.queue.store import _job
+    from dataclasses import fields, MISSING
+    row={f.name:(None if f.default is MISSING else f.default) for f in fields(m.QueueJob)}
+    row.pop('host',None); row.update(state='QUEUED',stop_requested=None)
+    assert getattr(_job(row),'host',None)=='github.com'

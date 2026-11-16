@@ -230,3 +230,15 @@ def test_R23_plus_cannot_alias_transformed_namespace():
     saved = n.project_folders("Owner", transformed)[1]
     assert saved != transformed and n.is_safe_component(saved) and re.search(r"\+[0-9a-f]{12}$", saved)
     assert n.project_folders("Owner", "a+b")[1] not in ("a+b", saved, transformed)
+
+
+@pytest.mark.parametrize('platform,root',[('win32','Q:/'+ '\U0001f600'*50),('linux','/'+'/'.join(['\u00e9'*100]*19+['x'*130]))],ids=['windows','posix'])
+def test_provider_components_and_budget(monkeypatch,platform,root):
+    from covearchive.github.urls import RepositoryTarget
+    monkeypatch.setattr(n,'sys',SimpleNamespace(platform=platform))
+    parts=n.project_components(RepositoryTarget('CON','Repo','codeberg','codeberg.org'))
+    assert parts==('codeberg.org',)+n.project_folders('CON','Repo')
+    short=n.filename_limit(root,'Owner','Repo','release-v1--1')
+    long=n.filename_limit(root,'Owner','Repo','release-v1--1',prefix=('codeberg.org',))
+    assert long==short-13
+    with pytest.raises(n.PathBudgetError): n.check_path_budget(root,'Owner','Repo','release-v1--1','x'*short,prefix=('codeberg.org',))

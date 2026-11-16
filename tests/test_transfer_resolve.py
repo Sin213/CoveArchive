@@ -1,6 +1,7 @@
 """Controlled local transport fixtures and CA-S7 boundary behavior."""
 from contextlib import contextmanager
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
+import json
 import http.server
 import io
 import socket
@@ -13,7 +14,7 @@ import requests
 from requests.adapters import BaseAdapter
 from requests.structures import CaseInsensitiveDict
 from covearchive.github.client import DirectSession
-from covearchive.github.models import ReleaseAsset
+from covearchive.github.models import Release, ReleaseAsset
 from covearchive.github.urls import RepositoryTarget
 from covearchive.transfer import resolve as r
 
@@ -218,7 +219,7 @@ def test_header_checks_before_yield_and_resources(server):
 
 def public_dns(*args): return [(2,1,6,"",("140.82.112.6",443))]
 
-@pytest.mark.parametrize("host", sorted(r._HOSTS))
+@pytest.mark.parametrize("host", sorted(r.PROVIDER_HOSTS["github"].redirect_hosts))
 def test_public_hosts_and_mixed_dns(host):
     url="https://"+host+"/asset?"+SECRET
     assert r.validate_hop(url,resolver=public_dns) == url
@@ -306,3 +307,64 @@ def test_pf3_boundary_errors_are_detached(mode):
     error=caught.value
     assert error.__context__ is None and error.__cause__ is None
     assert not any(part in str(error)+repr(vars(error)) for part in ('sig=','se=','sp=',marker))
+
+
+CB = RepositoryTarget('Owner','Repo','codeberg','codeberg.org')
+UUID = 'bbde8b93-f9d8-4323-a4c6-3fbd119e5fd4'
+CB_RELEASE = Release(10,'v1',None,False,False,None,'',None,None,(asset(),),None,None)
+def cb_meta(**patch):
+    return 200,{'Content-Type':'application/json'},json.dumps(dict(id=7,size=len(BODY),name='app.zip',type='attachment',uuid=UUID,browser_download_url='https://evil.invalid/'+SECRET)|patch).encode()
+class CodebergAdapter(ScriptAdapter):
+    def send(self,*a,**k):
+        class Raw(io.BytesIO):
+            def read(self,n,decode_content=False): return super().read(n)
+        response=super().send(*a,**k); response.raw=Raw(response.raw.getvalue()); return response
+
+def cb_stream(script, **options):
+    session=DirectSession(); adapter=CodebergAdapter(script); session.mount('https://',adapter)
+    options.setdefault('release',CB_RELEASE); options.setdefault('resolver',public_dns); options.setdefault('sleep',lambda n:None)
+    with r.open_asset_stream(CB,asset(),session=session,**options) as chunks: data=b''.join(chunks)
+    return data,adapter
+
+def test_codeberg_uuid_bound_stream():
+    data,adapter=cb_stream([cb_meta(),(200,{},BODY)])
+    assert data==BODY and adapter.closed
+    assert [q.url for q,k in adapter.calls]==['https://codeberg.org/api/v1/repos/Owner/Repo/releases/10/assets/7','https://codeberg.org/attachments/'+UUID]
+    assert [q.headers['Accept'] for q,k in adapter.calls]==['application/json','application/octet-stream']
+    assert all(q.headers['Accept-Encoding']=='identity' and k['verify'] and not k['proxies'] for q,k in adapter.calls)
+
+@pytest.mark.parametrize('script,options,code',
+    [([cb_meta(**patch)],{},code) for patch,code in [({'id':8},'invalid_asset_identity'),({'id':True},'invalid_asset_identity'),({'size':0},'size_mismatch'),({'size':True},'size_mismatch'),({'type':'external'},'invalid_asset_identity'),({'name':'other.zip'},'invalid_asset_identity'),({'uuid':UUID.upper()},'invalid_asset_identity')]]+
+    [([(200,{'Content-Type':'application/json'},body)],{},'invalid_asset_identity') for body in (b'{}',b'not JSON')]+
+    [([cb_meta(),(200,{},body)],{},code) for body,code in [(BODY[:-1],'partial_transfer'),(BODY+b'x','size_mismatch')]]+
+    [([cb_meta(),(200,headers,BODY)],{},code) for headers,code in [({'Content-Length':'1'},'size_mismatch'),({'Content-Encoding':'gzip'},'unexpected_encoding'),({'Content-Range':'bytes 0-1/2'},'unexpected_status'),({'Content-Type':'text/html'},'unexpected_content')]]+
+    [([cb_meta(),(404,{},b'')],{},'upstream_removed'), ([(404,{},b'')],{},'upstream_removed'),
+     ([(429,{'Retry-After':'17'},b'')],{},'rate_limited'), ([cb_meta(),(429,{'Retry-After':'17'},b'')],{},'rate_limited'),
+     ([(503,{},b'')]*3,{},'server_error'), ([],{'cancel':lambda:True},'cancelled'),
+     ([cb_meta()]+[(503,{},b'')]*3,{},'server_error'),
+     ([(200,{'Content-Type':'application/json'},b'x'*65537)],{},'size_mismatch'),
+     ([(200,{'Content-Type':'application/octet-stream'},b'{}')],{},'invalid_asset_identity'),
+     ([],{'clock':iter([0,30000]).__next__},'timeout'), ([],{'release':None},'invalid_asset_identity'),
+     ([],{'resolver':lambda *a:[(2,1,6,'',('10.0.0.1',443))]},'unsafe_redirect')]+
+    [([cb_meta(),(302,{'Location':location},b'')],{},code) for location,code in [('https://objects.githubusercontent.com/a','unknown_cdn_host'),('https://127.0.0.1/a','unsafe_redirect'),('http://codeberg.org/a','unsafe_redirect'),('/attachments/'+UUID,'unsafe_redirect')]]+
+    [([cb_meta(),(302,{'Location':'/a'},b''),(302,{'Location':'/b'},b'')],{'policy':r.TransferPolicy(max_redirects=1)},'unsafe_redirect')])
+def test_codeberg_transfer_fail_closed(script,options,code):
+    with pytest.raises(r.DownloadError) as caught: cb_stream(script,**options)
+    assert caught.value.code==code
+    assert not any(x in str(caught.value)+repr(vars(caught.value)) for x in (UUID,'https://','sig=','GitHub'))
+    if code=='rate_limited': assert caught.value.retry_after_seconds==17
+
+@pytest.mark.parametrize('provider,url', [('github','https://codeberg.org/a')]+[('codeberg',url) for url in ('https://api.github.com/a','https://codeberg.org.evil.com/a','https://codeberg.org:8443/a','https://127.0.0.1/a','http://codeberg.org/a','https://user@codeberg.org/a')])
+def test_codeberg_host_policy_separation(provider,url):
+    with pytest.raises(r.DownloadError): r.validate_hop(url,provider=provider,resolver=public_dns)
+
+def test_codeberg_entry_policy_is_separate_from_redirects():
+    assert r.validate_hop('https://codeberg.org:443/a',provider='codeberg',entry=True,resolver=public_dns)
+    with pytest.raises(r.DownloadError): r.validate_hop('https://objects.githubusercontent.com/a',entry=True,resolver=public_dns)
+
+@pytest.mark.parametrize('path',['/api/v1/repos/Other/Repo/releases/10/assets/7','/api/v1/repos/Owner/Repo/releases/99/assets/7','/other'])
+def test_codeberg_metadata_redirect_never_requests_target(path):
+    session=DirectSession(); adapter=CodebergAdapter([(302,{'Location':path},b''),cb_meta(),(200,{},BODY)]); session.mount('https://',adapter)
+    with pytest.raises(r.DownloadError) as caught:
+        with r.open_asset_stream(CB,asset(),release=CB_RELEASE,session=session,resolver=public_dns): pytest.fail('entered')
+    assert caught.value.code=='unsafe_redirect' and [q.url for q,k in adapter.calls]==['https://codeberg.org/api/v1/repos/Owner/Repo/releases/10/assets/7']

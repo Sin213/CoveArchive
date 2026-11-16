@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QLi
 
 from covearchive.formats import FORMAT_LABELS, SUPPORTED_EXTENSIONS, DEFAULT_EXTENSIONS
 from covearchive.build_filters import BuildRules, BuildFilterError, parse_patterns, allowed
-from covearchive.archive.naming import validate_root, project_folders, release_folder_name
+from covearchive.archive.naming import validate_root, project_components, release_folder_name
 from pathlib import Path
 from covearchive.ui.preferences import PreferenceStore
 from covearchive.ui.library_store import LibraryStore
@@ -21,7 +21,8 @@ from covearchive.queue.store import default_queue_path, QueueError
 from covearchive.ui.branding import app_icon
 from covearchive.ui.archive_bridge import ArchiveBridge, EnqueueRequest, EnqueueItem
 from covearchive.github.select import select_releases
-from covearchive.github.urls import GitHubUrlError, ReleaseTagTarget, parse_github_url
+from covearchive.github.urls import GitHubUrlError, ReleaseTagTarget, RepositoryTarget
+from covearchive.providers import parse_repository_url, canonical_url, display_name
 from covearchive.scan_worker import ProtocolError, ScanFailure
 from covearchive.ui.scan_process import ScanController
 from covearchive.ui.auto_archive import AutoArchive
@@ -116,7 +117,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(app_icon())
         self.controller = controller if controller is not None else ScanController(launcher, parent=self)
         self.catalog = None; self.show_catalog = False; self.active_id = None
-        self.started = 0; self.checked=set(); self.eligible={}; self.rules=BuildRules(); self._rules_repo=None; self.enqueue_pending=False
+        self.started = 0; self.checked=set(); self.eligible={}; self.rules=BuildRules(); self._rules_repo=None; self.enqueue_pending=False; self._scan_provider='github'
         self.bridge=bridge if bridge is not None else ArchiveBridge(parent=self)
         self.preferences=preferences if preferences is not None else PreferenceStore()
         self.settings, self.preference_problem, _=self.preferences.load()
@@ -126,7 +127,7 @@ class MainWindow(QMainWindow):
         central = QWidget(); self.tabs=QTabWidget(); self.setCentralWidget(self.tabs); self.tabs.addTab(central,"Browse"); layout = QVBoxLayout(central); layout.setSpacing(4); layout.setContentsMargins(8,8,8,8)
         layout.addWidget(QLabel("CoveArchive - part of the Cove Nexus family"))
         row = QHBoxLayout(); layout.addLayout(row)
-        self.url = QLineEdit(); self.url.setPlaceholderText("https://github.com/owner/repository/releases")
+        self.url = QLineEdit(); self.url.setPlaceholderText("https://github.com/owner/repository/releases or codeberg.org/owner/repository")
         self.scan = QPushButton("Scan"); self.cancel = QPushButton("Cancel Scan"); self.cancel.setEnabled(False)
         row.addWidget(self.url,1); row.addWidget(self.scan); row.addWidget(self.cancel)
         filters = QHBoxLayout(); layout.addLayout(filters)
@@ -236,13 +237,15 @@ class MainWindow(QMainWindow):
 
     def _start(self):
         if self.active_id is not None or self.controller.job is not None: return
+        self._scan_provider='codeberg' if self.url.text().lower().startswith(('https://codeberg.org/','codeberg.org/')) else 'github'
         try:
-            target = parse_github_url(self.url.text())
+            target = parse_repository_url(self.url.text())
             if isinstance(target,ReleaseTagTarget):
                 self._clear(); self._status("Invalid URL: paste the repository or its /releases URL",True); return
-            self.controller.start(f"https://github.com/{target.owner}/{target.repo}")
+            self._scan_provider=target.provider; self.url.setAccessibleName(display_name(target.provider)+' URL')
+            self.controller.start(canonical_url(RepositoryTarget(target.owner,target.repo,target.provider,target.host)))
         except (GitHubUrlError,TypeError,ProtocolError):
-            self._clear(); self._status("Invalid URL: not a supported GitHub repository/releases URL",True); return
+            self._clear(); self._status(f"Invalid URL: not a supported {display_name(self._scan_provider)} repository/releases URL",True); return
 
     def _state(self, request_id, state):
         if self._window_closed: return
@@ -266,8 +269,9 @@ class MainWindow(QMainWindow):
         self.url.setEnabled(True); self.scan.setEnabled(True); self.cancel.setEnabled(False)
         self.url.setFocus()
         if state == "COMPLETED":
-            self.catalog=result.catalog; key=self.catalog.repository.repo_key; saved=self.settings["repositories"].get(key)
-            if saved or self._rules_repo not in (None,key):
+            self.catalog=result.catalog; key=self.catalog.repository.repo_key; github=self.catalog.repository.provider=='github'
+            saved=self.settings["repositories"].get(key) if github else None
+            if saved or self._rules_repo not in (None,key) or not github:
                 values=saved or dict(include=[],exclude=[],extensions=list(DEFAULT_EXTENSIONS),prereleases=False)
                 self.rules=BuildRules(values["include"],values["exclude"])
                 for edit,text in ((self.include,", ".join(self.rules.include)),(self.exclude,", ".join(self.rules.exclude))): edit.blockSignals(True); edit.setText(text); edit.blockSignals(False)
@@ -284,7 +288,7 @@ class MainWindow(QMainWindow):
         self._status(self._error_text(result),True)
 
     def _error_text(self, error):
-        code=error.code; detail=error.detail or {}
+        code=error.code; detail=error.detail or {}; provider=display_name(getattr(self,'_scan_provider','github'))
         if code == "process":
             return ("Failed: the scan process could not start" if error.message == "Worker could not start." else
                     "Failed: the scan process stopped unexpectedly")
@@ -295,11 +299,11 @@ class MainWindow(QMainWindow):
         if code in ("forbidden","unauthorized"): return f"Access denied ({error.http_status})"
         if code == "not_found": return "Not found: repository not found or inaccessible"
         if code == "network": return "Network error: connection failed"
-        if code == "timeout": return "Timed out: GitHub did not respond in time; try again"
+        if code == "timeout": return f"Timed out: {provider} did not respond in time; try again"
         if code == "incomplete_scan": return "Release listing incomplete, retry"
-        if code in ("invalid_json","invalid_root","too_many_items","invalid_release","response_too_large","protocol"):
-            return "Failed: GitHub returned unexpected data"
-        if code == "invalid_url": return "Invalid URL: not a supported GitHub repository/releases URL"
+        if code in ("invalid_json","invalid_root","too_many_items","invalid_release","response_too_large","protocol","invalid_content_type"):
+            return f"Failed: {provider} returned unexpected data"
+        if code == "invalid_url": return f"Invalid URL: not a supported {provider} repository/releases URL"
         return f"Failed ({code})"
 
     def _refresh(self):
@@ -310,7 +314,8 @@ class MainWindow(QMainWindow):
         count=sum(len(ids) for ids in self.tree.model().matches)
         self.eligible={(row.release.id,m.asset.id):(row.release,m.asset) for i,row in enumerate(selection.releases) for m in row.matches if id(m.asset) in self.tree.model().matches[i]}
         self.preview.setText(f"Rules match {count} of {sum(len(r.matches) for r in selection.releases)} eligible assets"); self._selection_changed()
-        self.summary.setText(f"{display(self.catalog.repository.owner)}/{display(self.catalog.repository.repo)} | "
+        prefix='' if self.catalog.repository.provider=='github' else display_name(self.catalog.repository.provider)+' | '
+        self.summary.setText(prefix+f"{display(self.catalog.repository.owner)}/{display(self.catalog.repository.repo)} | "
                              f"{len(selection.releases)} releases | {count} matching assets")
         hidden=sum(x.reason=="prerelease" for x in selection.excluded)
         text = ("No formats selected" if not enabled else "No releases found" if not self.catalog.releases else
@@ -329,7 +334,12 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _selection_changed(self):
-        self.save_rules.setEnabled(bool(self.show_catalog and self.catalog))
+        github=bool(self.catalog and self.catalog.repository.provider=='github')
+        self.save_rules.setEnabled(bool(self.show_catalog and github))
+        self.save_rules.setToolTip('Saving rules is unavailable for Codeberg repositories.' if self.catalog and not github else '')
+        text='Save rules (GitHub only)' if self.catalog and not github else 'Save rules for this repository'
+        self.save_rules.setText(text); self.save_rules.setAccessibleName(text)
+        self.save_rules.setAccessibleDescription(self.save_rules.toolTip() or 'Save rules for this repository')
         count=len(self.checked & self.eligible.keys()); hidden=len(self.checked-self.eligible.keys())
         self.archive_selected.setText(f"Archive Selected ({count})"); self.archive_selected.setEnabled(bool(count) and not self.enqueue_pending and not self.bridge.shutting_down and not self.bridge.closed)
         self.held_back.setText(f"{hidden} checked item(s) hidden by filters are not included" if hidden else ""); self._destination()
@@ -338,6 +348,8 @@ class MainWindow(QMainWindow):
         if not self.show_catalog or self.catalog is None:
             self.rule_error.setText("Scan a repository before saving rules")
             return
+        if self.catalog.repository.provider!='github':
+            self.rule_error.setText('Saving rules is unavailable for Codeberg repositories.'); return
         try:
             self.rules=BuildRules(parse_patterns(self.include.text()),parse_patterns(self.exclude.text()))
         except BuildFilterError as error:
@@ -354,7 +366,7 @@ class MainWindow(QMainWindow):
         try:
             validate_root(self.root.text()); root=Path(self.root.text())
             if not self.catalog or not self.tree.model().rows: self.destination.setText(str(root)); return
-            owner,repo=project_folders(self.catalog.repository.owner,self.catalog.repository.repo); project=root/owner/repo
+            project=root.joinpath(*project_components(self.catalog.repository))
             releases={r.id:r for key,(r,asset) in self.eligible.items() if key in self.checked}
             path=str(project/release_folder_name(next(iter(releases.values())).tag_name,next(iter(releases)))) if len(releases)==1 else f"{len(releases)} release folders under {project}{os.sep}" if releases else str(project/"<release folder>")
             self.destination.setText(path+" (existing folder spelling is reused if present)")

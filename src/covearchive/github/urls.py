@@ -46,20 +46,26 @@ class GitHubUrlError(ValueError):
 class RepositoryTarget:
     owner: str
     repo: str
+    provider: str = "github"
+    host: str = "github.com"
 
     @property
     def repo_key(self) -> str:
-        return self.owner.casefold() + "/" + self.repo.casefold()
+        key = self.owner.casefold() + "/" + self.repo.casefold()
+        return key if self.provider == "github" else self.host.casefold() + "/" + key
 
 
 @dataclass(frozen=True)
 class ReleaseListTarget:
     owner: str
     repo: str
+    provider: str = "github"
+    host: str = "github.com"
 
     @property
     def repo_key(self) -> str:
-        return self.owner.casefold() + "/" + self.repo.casefold()
+        key = self.owner.casefold() + "/" + self.repo.casefold()
+        return key if self.provider == "github" else self.host.casefold() + "/" + key
 
 
 @dataclass(frozen=True)

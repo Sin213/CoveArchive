@@ -411,3 +411,23 @@ The version-1 `library.json` gains an optional `auto_archive` key, written only 
 Older builds treat a library containing this key as unreadable and make it read-only.
 Export/import do not carry the setting. Auto-Archive was verified on Windows only;
 Arch shares the code but is not claimed verified by these Windows runs.
+
+## Codeberg release archives
+
+Browse accepts `https://codeberg.org/Owner/Repo`, its `/releases` URL, or the
+same URLs without the scheme. Only public, anonymous access to codeberg.org is
+supported; credentials, explicit ports, other forge hosts and tag URLs are rejected.
+Attachment lookup and downloads allow codeberg.org only, with checked redirects.
+Archives use `<root>/codeberg.org/<Owner>/<Repo>/<release folder>/`;
+existing GitHub paths and metadata v1 remain unchanged. Codeberg metadata uses
+v2, which older builds refuse rather than overwrite.
+The queue upgrades transactionally to schema v2 while excluding an active runner.
+Older builds lock the queue by the exact path given, so close any older CoveArchive before first launching this build (migration cannot detect an older runner using a different path alias).
+Older builds refuse that queue file after upgrade: keep a backup if you may downgrade.
+Restored jobs remain idle until Start Queue. Save Rules is disabled for Codeberg;
+Library and Auto-Archive remain GitHub-only. Codeberg provides no attachment
+digests: local SHA-256 is recorded, without publisher verification.
+Only native attachments with known sizes are eligible; external links and unknown
+sizes are excluded. Listings fail closed on pagination inconsistencies or limits;
+renamed repositories and download hosts beyond codeberg.org are unsupported.
+Attachment lists come from release listings (equal to the per-release assets endpoint for 221 live releases, maximum 21 assets; larger counts untested).

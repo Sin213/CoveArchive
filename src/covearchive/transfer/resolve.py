@@ -20,15 +20,25 @@ from urllib.parse import urljoin, urlsplit
 import requests
 
 from covearchive import __version__
-from covearchive.github.client import API_VERSION, DirectSession
-from covearchive.github.models import ReleaseAsset
-from covearchive.github.urls import RepositoryTarget, parse_github_url
+from covearchive.github.client import API_VERSION, DirectSession, _json
+from covearchive.github.models import Release, ReleaseAsset
+from covearchive.github.urls import RepositoryTarget
+from covearchive.providers import validate_repository
 
 # Documented/observed GitHub release-asset hosts; re-verify when GitHub changes:
 # API serves the identity-bound entry; release-assets is the current signed CDN;
 # objects and github-releases are established release-asset storage endpoints.
-_HOSTS = frozenset(("api.github.com", "release-assets.githubusercontent.com",
-                    "objects.githubusercontent.com", "github-releases.githubusercontent.com"))
+@dataclass(frozen=True)
+class ProviderHosts:
+    entry_hosts: frozenset
+    redirect_hosts: frozenset
+
+
+PROVIDER_HOSTS = {
+    "github": ProviderHosts(frozenset({"api.github.com"}), frozenset(("api.github.com",
+        "release-assets.githubusercontent.com", "objects.githubusercontent.com", "github-releases.githubusercontent.com"))),
+    "codeberg": ProviderHosts(frozenset({"codeberg.org"}), frozenset({"codeberg.org"})),
+}
 
 
 @dataclass(frozen=True)
@@ -63,12 +73,12 @@ PRODUCTION_POLICY = TransferPolicy()
 
 class DownloadError(Exception):
     """Stable, URL-free error metadata; remote error text is never retained."""
-    def __init__(self, code, *, retry_after_seconds=None, retryable=False):
+    def __init__(self, code, *, retry_after_seconds=None, retryable=False, provider="github"):
         self.code = code if isinstance(code,str) and re.fullmatch(r"[a-z_]{1,64}",code) else "download_error"
         self.retry_after_seconds = retry_after_seconds if type(retry_after_seconds) is int else None
         self.retryable = bool(retryable)
         super().__init__("GitHub CDN may have changed; retry after updating CoveArchive."
-            if self.code == "unknown_cdn_host" else self.code)
+            if self.code == "unknown_cdn_host" and provider == "github" else self.code)
 
 
 def _safe_text(url):
@@ -81,9 +91,10 @@ def _public(address):
     return value.is_global and not value.is_multicast
 
 
-def validate_hop(url, *, policy=PRODUCTION_POLICY, resolver=socket.getaddrinfo):
+def validate_hop(url, *, policy=PRODUCTION_POLICY, resolver=socket.getaddrinfo, provider="github", entry=False):
     """Validate syntax, exact host and every DNS answer without requesting bytes."""
     if not isinstance(policy,TransferPolicy): raise TypeError("Expected TransferPolicy.")
+    if provider not in PROVIDER_HOSTS: raise DownloadError("invalid_asset_identity") from None
     if not _safe_text(url): raise DownloadError("unsafe_redirect") from None
     invalid = False
     try:
@@ -105,7 +116,9 @@ def validate_hop(url, *, policy=PRODUCTION_POLICY, resolver=socket.getaddrinfo):
         else: raise ValueError
     except (ValueError,TypeError,UnicodeError): invalid = True
     if invalid: raise DownloadError("unsafe_redirect") from None
-    if host not in _HOSTS: raise DownloadError("unknown_cdn_host",retryable=True) from None
+    hosts = PROVIDER_HOSTS[provider]
+    if host not in (hosts.entry_hosts if entry else hosts.redirect_hosts):
+        raise DownloadError("unknown_cdn_host",retryable=True,provider=provider) from None
     failed = False
     try:
         answers = resolver(host,443,0,socket.SOCK_STREAM)
@@ -166,7 +179,7 @@ def _pause(seconds, policy, cancel, sleep, clock, deadline):
         _check(cancel,clock,deadline)
 
 
-def _chunks(response, size, cancel, clock, deadline):
+def _chunks(response, size, cancel, clock, deadline, *, exact=True):
     total = 0
     while True:
         _check(cancel,clock,deadline)
@@ -189,12 +202,12 @@ def _chunks(response, size, cancel, clock, deadline):
         total += len(chunk)
         if total > size: raise DownloadError("size_mismatch") from None
         yield chunk
-    if total != size: raise DownloadError("partial_transfer",retryable=True) from None
+    if exact and total != size: raise DownloadError("partial_transfer",retryable=True) from None
 
 
 @contextmanager
 def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=None,
-                      sleep=time.sleep, clock=time.monotonic, resolver=socket.getaddrinfo):
+                      sleep=time.sleep, clock=time.monotonic, resolver=socket.getaddrinfo, release=None, provider=None):
     """Yield checked chunks after headers; always close response and session.
 
     Injected sessions must be DirectSession and are consumed/closed by this call.
@@ -206,12 +219,18 @@ def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=No
         raise TypeError("Expected repository and asset metadata.")
     invalid = False
     try:
-        if (parse_github_url(f"https://github.com/{repository.owner}/{repository.repo}") != repository
+        validate_repository(repository)
+        if (provider is not None and provider != repository.provider
                 or type(asset.id) is not int or not 1 <= asset.id <= 2**63-1
                 or type(asset.size) is not int or not 0 <= asset.size <= 2**53-1):
             raise ValueError
     except (ValueError,TypeError,UnicodeError): invalid = True
     if invalid: raise DownloadError("invalid_asset_identity") from None
+    provider = repository.provider
+    metadata = codeberg = provider == "codeberg"
+    if codeberg and (not isinstance(release,Release) or type(release.id) is not int
+            or not 1 <= release.id <= 2**63-1 or asset not in release.assets or asset.state != "uploaded"):
+        raise DownloadError("invalid_asset_identity") from None
     if session is not None and not isinstance(session,DirectSession):
         raise TypeError("Expected DirectSession.")
     session = DirectSession() if session is None else session
@@ -223,11 +242,15 @@ def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=No
         headers = {"Accept":"application/octet-stream", "Accept-Encoding":"identity",
             "User-Agent":f"CoveArchive/{__version__}", "X-GitHub-Api-Version":API_VERSION}
         entry = (policy._test_origin or "https://api.github.com") + f"/repos/{repository.owner}/{repository.repo}/releases/assets/{asset.id}"
+        if codeberg:
+            headers.pop("X-GitHub-Api-Version")
+            headers["Accept"] = "application/json"
+            entry = f"https://codeberg.org/api/v1/repos/{repository.owner}/{repository.repo}/releases/{release.id}/assets/{asset.id}"
         url, visited, hops, retries, refreshed = entry, {entry}, 0, 0, False
         deadline = clock()+policy.deadline_seconds
         while True:
             _check(cancel,clock,deadline)
-            validate_hop(url,policy=policy,resolver=resolver)
+            validate_hop(url,policy=policy,resolver=resolver,provider=provider,entry=hops==0)
             failure = None
             try:
                 remaining = deadline-clock()
@@ -245,17 +268,18 @@ def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=No
                 _pause(2**retries,policy,cancel,sleep,clock,deadline); retries += 1; continue
             _check(cancel,clock,deadline); _peer(response,policy)
             status, values = response.status_code, response.headers
+            if metadata and 300 <= status < 400: raise DownloadError("unsafe_redirect") from None
             if status in (301,302,303,307,308):
                 location = values.get("Location")
                 if not _safe_text(location): raise DownloadError("unsafe_redirect") from None
                 invalid = False
                 try:
                     moved = urljoin(url,location)
-                    validate_hop(moved,policy=policy,resolver=resolver)
+                    validate_hop(moved,policy=policy,resolver=resolver,provider=provider)
                 except (ValueError,TypeError,UnicodeError,OverflowError): invalid = True
                 if invalid: raise DownloadError("unsafe_redirect") from None
                 if (moved in visited or hops >= policy.max_redirects
-                        or (not policy._test_origin and urlsplit(moved).hostname == "api.github.com")):
+                        or (not codeberg and not policy._test_origin and urlsplit(moved).hostname == "api.github.com")):
                     raise DownloadError("unsafe_redirect") from None
                 response.close(); response=None
                 url=moved; visited.add(url); hops += 1; continue
@@ -266,7 +290,7 @@ def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=No
                 if values.get("X-RateLimit-Remaining")=="0" and re.fullmatch(r"[0-9]{1,15}",reset): waits.append(int(reset)-int(time.time()))
                 wait = max(waits) if waits else 60
                 raise DownloadError("rate_limited",retry_after_seconds=max(1,min(86400,wait)),retryable=True) from None
-            if url != entry and status in (400,403,410):
+            if not codeberg and url != entry and status in (400,403,410):
                 if refreshed: raise DownloadError("expired_url",retryable=True) from None
                 response.close(); response=None
                 url,visited,hops,refreshed = entry,{entry},0,True
@@ -275,7 +299,7 @@ def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=No
                 response.close(); response=None
                 if retries >= 2: raise DownloadError("server_error",retryable=True) from None
                 _check(cancel,clock,deadline); _pause(2**retries,policy,cancel,sleep,clock,deadline); retries += 1; continue
-            if status == 404: raise DownloadError("upstream_removed" if url == entry else "not_found") from None
+            if status == 404: raise DownloadError("upstream_removed" if codeberg or url == entry else "not_found") from None
             if status == 403: raise DownloadError("forbidden") from None
             if status != 200 or "Content-Range" in values:
                 raise DownloadError("unexpected_status") from None
@@ -284,6 +308,29 @@ def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=No
             if values.get("Content-Type","").split(";",1)[0].lower() == "text/html":
                 raise DownloadError("unexpected_content") from None
             length = values.get("Content-Length")
+            if metadata:
+                if (values.get("Content-Type","").split(";",1)[0].strip().lower() != "application/json"
+                        or length is not None and (not re.fullmatch(r"[0-9]{1,20}",length) or int(length)>65536)):
+                    raise DownloadError("invalid_asset_identity") from None
+                body = b"".join(_chunks(response,65536,cancel,clock,deadline,exact=False))
+                invalid = False
+                try:
+                    obj = _json(body)
+                    if (not isinstance(obj,dict) or type(obj.get("id")) is not int or obj["id"] != asset.id
+                            or obj.get("type") != "attachment" or obj.get("name") != asset.name
+                            or not isinstance(obj.get("uuid"),str)
+                            or re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}",obj["uuid"]) is None
+                            or length is not None and int(length) != len(body)):
+                        raise ValueError
+                except (ValueError,TypeError,UnicodeError,RecursionError,OverflowError): invalid = True
+                if invalid: raise DownloadError("invalid_asset_identity") from None
+                if type(obj.get("size")) is not int or obj["size"] != asset.size:
+                    raise DownloadError("size_mismatch") from None
+                response.close(); response=None
+                entry = url = "https://codeberg.org/attachments/"+obj["uuid"]
+                visited,hops,metadata = {url},0,False
+                headers["Accept"] = "application/octet-stream"
+                continue
             if length is not None and (not re.fullmatch(r"[0-9]{1,20}",length) or int(length) != asset.size):
                 raise DownloadError("size_mismatch") from None
             yield _chunks(response,asset.size,cancel,clock,deadline)

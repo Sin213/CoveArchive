@@ -13,7 +13,8 @@ from pathlib import PurePath
 import time
 
 from covearchive.github.models import Release, ReleaseAsset
-from covearchive.github.urls import RepositoryTarget, parse_github_url
+from covearchive.github.urls import RepositoryTarget
+from covearchive.providers import validate_repository
 from covearchive.transfer.resolve import DownloadError, open_asset_stream
 from . import manifest as m, naming, plan, store
 from .store import winfs
@@ -167,8 +168,7 @@ def archive_asset(repository, release, asset, archive_root, *, policy=None, sess
     try:
         invalid = False
         try:
-            if parse_github_url(f"https://github.com/{repository.owner}/{repository.repo}") != repository:
-                raise ValueError
+            validate_repository(repository)
         except (ValueError,TypeError,UnicodeError): invalid = True
         if invalid: raise DownloadError("invalid_asset_identity") from None
         selected = [a for a in release.assets if a.id == asset.id]
@@ -248,7 +248,7 @@ def archive_asset(repository, release, asset, archive_root, *, policy=None, sess
                                 return replace(result,status=ArchiveStatus.MISMATCH,code="publisher_digest_mismatch")
                             result = replace(result,change="MISSING")
                     if completed is None:
-                        with open_asset_stream(repository,asset,policy=policy,session=session,cancel=cancel,sleep=sleep,clock=clock) as chunks:
+                        with open_asset_stream(repository,asset,release=release,policy=policy,session=session,cancel=cancel,sleep=sleep,clock=clock) as chunks:
                             result = replace(result,transferred=True)
                             if progress is not None: chunks = _observed(chunks,progress,asset.size)
                             outcome = store.write_asset(directory,record.saved_name,chunks,record.size,

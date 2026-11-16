@@ -53,8 +53,13 @@ class _Control:
     window_bytes: int=0
 
 def _catalog(repository):
-    from covearchive.github.client import GitHubReleaseClient
-    with GitHubReleaseClient() as client: return client.discover_releases(repository)
+    from covearchive.providers import validate_repository
+    validate_repository(repository)
+    if repository.provider=='codeberg':
+        from covearchive.forgejo import ForgejoReleaseClient as Client
+    else:
+        from covearchive.github.client import GitHubReleaseClient as Client
+    with Client() as client: return client.discover_releases(repository)
 
 def _catalog_error(exc):
     from covearchive.github import client as g
@@ -123,7 +128,7 @@ class QueueRunner:
                 limit=min(self.settings.max_attempts,LIMITED_RETRY.get(job.last_error_code,self.settings.max_attempts))
                 if job.retry_count>=limit: outcome=Outcome('failed',job.last_error_code or 'retry_exhausted')
                 else:
-                    repository=RepositoryTarget(job.owner,job.repo)
+                    repository=RepositoryTarget(job.owner,job.repo,job.provider,job.host)
                     release,asset,outcome=self._lookup(repository,job)
                     if outcome is None:
                         if not self._cancelled(control):

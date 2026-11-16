@@ -9,7 +9,7 @@ from covearchive.queue.store import QueueStore, RunnerLock
 from covearchive.queue.runner import QueueRunner
 from covearchive.archive.download import ArchiveResult, ArchiveStatus
 from covearchive.github import client as g
-from test_queue_store import item
+from test_queue_store import item, memory_store
 
 S=m.JobState
 def result(status='ARCHIVED',code=None,**kw): return ArchiveResult(ArchiveStatus(status),code,1,10,**kw)
@@ -21,6 +21,28 @@ class Clock:
     def __init__(self): self.now=100; self.sleeps=[]
     def __call__(self): return self.now
     def sleep(self,n): self.sleeps.append(n); self.now=round(self.now+n,9)
+
+
+def test_provider_runner_dispatch_cache_and_reconstruction(monkeypatch):
+    import covearchive.forgejo as forgejo
+    from covearchive.queue import runner as rr
+    store,c=memory_store(); target,release,asset,root=item(); cb=replace(target,provider='codeberg',host='codeberg.org'); fetched=[]; archived=[]
+    class Client:
+        def __enter__(self): return self
+        def __exit__(self,*a): pass
+        def discover_releases(self,repo): fetched.append(repo); return NS(releases=(release,))
+    monkeypatch.setattr(g,'GitHubReleaseClient',Client); monkeypatch.setattr(forgejo,'ForgejoReleaseClient',Client)
+    monkeypatch.setattr(rr,'RunnerLock',lambda p:NS(close=lambda:None))
+    def archive(repo,r,a,path,**kw): archived.append(repo); assert (r,a)==(release,asset); return result()
+    try:
+        store.enqueue_many([(repo,release,asset,root) for repo in (target,cb)])
+        with QueueRunner(store,archive=archive) as runner:
+            assert all(j.state==S.QUEUED for j in store.list_jobs()) and not fetched
+            for repo in (target,cb,target,cb): runner._metadata(repo)
+            assert fetched==[target,cb] and len(runner._cache)==len(runner._catalog_locks)==2
+            assert runner.run_pending().completed==2
+        assert set(archived)=={target,cb} and len(fetched)==4
+    finally: c.close()
 
 def test_Q07_Q08_Q09_Q10_bounded_projects(tmp_path):
     items=[item(1),item(2),item(3,root=native_root('C:/Other')),item(4,root=native_root('C:/Third'))]
@@ -353,7 +375,7 @@ def test_Q07_snapshot_progress(tmp_path):
 def test_Q25_F1_runner_live_version(tmp_path):
     import sqlite3
     calls=[]; store,runner=prepare(tmp_path,[item()],archive=lambda *a,**k:calls.append(1))
-    with sqlite3.connect(store.path) as c: c.execute('PRAGMA user_version=2')
+    with sqlite3.connect(store.path) as c: c.execute('PRAGMA user_version=3')
     before=store.path.read_bytes()
     try:
         with pytest.raises(m.QueueVersionError): runner.run_pending()

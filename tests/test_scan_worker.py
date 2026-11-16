@@ -1,6 +1,7 @@
 """Offline protocol, serialization and worker self-defence behavior."""
 
 import io
+from dataclasses import replace
 import json
 from pathlib import Path
 import subprocess
@@ -50,10 +51,10 @@ def test_request_roundtrip():
     assert w.parse_request(w.encode_request(RID, URL)) == (RID, URL)
 
 
-@pytest.mark.parametrize("change", [dict(protocol=True), dict(protocol=2), dict(action="exec"),
+@pytest.mark.parametrize("change", [dict(protocol=True), dict(protocol=1), dict(action="exec"),
     dict(request_id="A"*32), dict(url=True), dict(url="x"*2049), dict(extra=0)])
 def test_request_strict(change):
-    obj = dict(protocol=1, request_id=RID, action="scan", url=URL) | change
+    obj = dict(protocol=2, request_id=RID, action="scan", url=URL) | change
     with pytest.raises(w.ProtocolError):
         w.parse_request(wire(obj))
 
@@ -74,7 +75,7 @@ def test_success_roundtrip_omits_notes():
 
 
 @pytest.mark.parametrize("change", [dict(protocol=True), dict(request_id="b"*32),
-    dict(status="maybe"), dict(extra=0), dict(result={}), dict(protocol=2)])
+    dict(status="maybe"), dict(extra=0), dict(result={}), dict(protocol=1)])
 def test_response_strict(change):
     obj = json.loads(w.encode_success(RID, catalog(release()))) | change
     with pytest.raises(w.ProtocolError):
@@ -195,3 +196,46 @@ def test_R4_worker_bounded_diagnostics(capsys):
     assert "RuntimeError" in line and len(line.splitlines()) == 1 and len(line) < 350
     assert w.main(stdin=io.BytesIO(b"bad\n"), stdout=io.BytesIO()) == 2
     assert "ProtocolError" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("provider,owner", [("github", "Owner"), ("codeberg", "Owner"), ("codeberg", "a"*40)])
+def test_provider_wire_roundtrip(provider, owner):
+    target = RepositoryTarget(owner, "Repo", provider, "github.com" if provider == "github" else "codeberg.org")
+    source = replace(catalog(release(assets=[asset(state="external", content_type="", browser_download_url="")])), repository=target)
+    data = w.encode_success(RID, source)
+    result = w.decode_response(data, RID).catalog
+    assert result.repository == target
+    assert result.releases == source.releases
+    assert json.loads(data)["protocol"] == 2
+
+
+@pytest.mark.parametrize("patch,missing", [
+    ({"provider": "github", "host": "codeberg.org"}, None),
+    ({"provider": "codeberg", "host": "github.com"}, None),
+    ({"provider": "other", "host": "codeberg.org"}, None),
+    ({"provider": True}, None), ({"host": None}, None), ({"extra": 1}, None),
+    ({"owner": "bad/owner"}, None), ({"repo": "Repo?query"}, None),
+    ({}, "provider"), ({}, "host"),
+])
+def test_provider_wire_identity_is_strict(patch, missing):
+    obj = json.loads(w.encode_success(RID, catalog()))
+    obj["result"].update(patch)
+    if missing: obj["result"].pop(missing, None)
+    with pytest.raises(w.ProtocolError): w.decode_response(wire(obj), RID)
+
+
+@pytest.mark.parametrize("provider", ["github", "codeberg"])
+def test_run_scan_dispatches_real_provider_factory(monkeypatch, provider):
+    import covearchive.github.client as github
+    import covearchive.forgejo as forgejo
+    target = RepositoryTarget("Owner", "Repo", provider, "github.com" if provider == "github" else "codeberg.org")
+    class Client:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def discover_releases(self, actual):
+            assert actual == target
+            return replace(catalog(release()), repository=target)
+    monkeypatch.setattr(github if provider == "github" else forgejo,
+                        "GitHubReleaseClient" if provider == "github" else "ForgejoReleaseClient", Client)
+    result = w.decode_response(wire(w.run_scan(RID, f"https://{target.host}/Owner/Repo")), RID)
+    assert result.catalog.repository == target

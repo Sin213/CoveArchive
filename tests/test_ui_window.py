@@ -68,6 +68,52 @@ def succeed(window, controller, *items):
     window.url.setText(URL); window.scan.click()
     controller.finish(w.decode_response(w.encode_success(RID, catalog(*items)), RID))
 
+@pytest.mark.parametrize('isolated_data',[None])
+@pytest.mark.parametrize('code',['timeout','invalid_json','invalid_url','invalid_content_type'])
+@pytest.mark.parametrize('host,expected',[('github.com','GitHub'),('codeberg.org','Codeberg'),('evil.example',None)])
+def test_provider_portable_scan(isolated_data,host,expected,code):
+    from types import SimpleNamespace as NS
+    calls=[]; statuses=[]
+    view=NS(active_id=None,url=NS(text=lambda:f'https://{host}/Owner/Repo/releases',setAccessibleName=lambda x:None),controller=NS(job=None,start=calls.append),_clear=lambda:None,_status=lambda text,*a:statuses.append(text))
+    MainWindow._start(view)
+    assert calls==([f'https://{host}/Owner/Repo'] if expected else [])
+    if expected:
+        text=MainWindow._error_text(view,w.ScanFailure(RID,code)); assert expected in text
+        if expected=='Codeberg': assert 'GitHub' not in text
+    else: assert 'Invalid URL' in statuses[0]
+
+@pytest.mark.parametrize('isolated_data',[None])
+def test_provider_save_rules_accessibility(isolated_data):
+    from types import SimpleNamespace as NS
+    from PySide6.QtWidgets import QPushButton, QLabel
+    from covearchive.github.urls import RepositoryTarget
+    v=NS(catalog=None,show_catalog=True,save_rules=QPushButton('Save rules for this repository'),checked=set(),eligible={},archive_selected=QPushButton(),enqueue_pending=False,bridge=NS(shutting_down=False,closed=False),held_back=QLabel(),rule_error=QLabel('preference problem'),_destination=lambda:None)
+    for provider in ('codeberg','github',None):
+        v.catalog=NS(repository=RepositoryTarget('Owner','Repo',provider,'codeberg.org' if provider=='codeberg' else 'github.com')) if provider else None
+        MainWindow._selection_changed(v)
+        text='Save rules (GitHub only)' if provider=='codeberg' else 'Save rules for this repository'
+        assert v.save_rules.text()==text; assert v.save_rules.accessibleName()==text and v.save_rules.isEnabled()==(provider=='github')
+        assert ('Codeberg' in v.save_rules.accessibleDescription()) if provider=='codeberg' else v.save_rules.accessibleDescription()==text
+        assert v.rule_error.text()=='preference problem'
+
+def test_provider_codeberg_rules_preview_and_selection(ui,monkeypatch):
+    from copy import deepcopy
+    from covearchive.github.urls import RepositoryTarget
+    v,c=ui; succeed(v,c,release()); v.include.setText('never-match'); v.save_rules.click(); before=deepcopy(v.settings['repositories'])
+    class Rules(dict):
+        def get(self,*a): pytest.fail('Codeberg read saved repository rules')
+    v.settings['repositories']=Rules(before); saved=v.preferences.path.read_bytes(); submitted=[]
+    monkeypatch.setattr(v.bridge,'enqueue',lambda request:submitted.append(request) or False)
+    v.url.setText('https://codeberg.org/Owner/Repo/releases'); v.scan.click()
+    source=replace(catalog(release(assets=[asset(1,'app.zip'),asset(2,'external.zip',state='external')])),repository=RepositoryTarget('Owner','Repo','codeberg','codeberg.org'))
+    c.finish(w.ScanSuccess(RID,source)); v.root.setText(native_root('C:/Archive'))
+    assert not v.save_rules.isEnabled() and 'Codeberg' in v.save_rules.toolTip() and not v.include.text()
+    assert str(NativePath('codeberg.org/Owner/Repo')) in v.destination.text()
+    model=v.tree.model(); parent=model.index(0,0); assert model.data(model.index(1,5,parent))=='Not uploaded'
+    assert not model.flags(model.index(1,0,parent)) & Qt.ItemIsUserCheckable
+    v._save_rules(); assert v.settings['repositories']==before and v.preferences.path.read_bytes()==saved
+    v._select(False); v._archive(); assert submitted[0].repository==source.repository
+
 
 def test_UI_01_launcher_smoke():
     result = subprocess.run([sys.executable, "-I", "-B", str(ROOT/"run_covearchive.py"),

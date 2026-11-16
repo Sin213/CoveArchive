@@ -13,7 +13,7 @@ compare-and-replace is not provided.
 """
 
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 import hashlib
@@ -69,11 +69,12 @@ def ensure_project(root: ArchiveRoot, repository: RepositoryTarget) -> Iterator[
     repository identity: callers adopt state.index.repository before committing;
     commit identity checks remain exact.
     """
-    owner, repo = naming.project_folders(repository.owner, repository.repo)
-    with root.open_dir(owner, create=True, fold_case=True) as owner_dir:
-        with owner_dir.open_dir(repo, create=True, fold_case=True) as project:
-            project.role = "project"
-            yield project
+    with ExitStack() as stack:
+        project = root
+        for component in naming.project_components(repository):
+            project = stack.enter_context(project.open_dir(component, create=True, fold_case=True))
+        project.role = "project"
+        yield project
 
 
 def ensure_release(project: Directory, folder: str, release_id: int) -> Directory:

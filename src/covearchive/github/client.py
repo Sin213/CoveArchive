@@ -181,7 +181,7 @@ def _api_url(url, error):
 
 
 @_typed_url(PaginationError)
-def _link_targets(header):
+def _link_targets(header, relation="next"):
     if not isinstance(header, str) or len(header.encode("utf-8")) > 8192 or not header:
         raise PaginationError()
     pieces, start, angle, quoted, escaped = [], 0, False, False, False
@@ -219,7 +219,7 @@ def _link_targets(header):
             if param is None:
                 raise PaginationError()
             name, quoted_value, token = param.groups()
-            if name.lower() == "rel" and "next" in (quoted_value or token or "").split():
+            if name.lower() == "rel" and relation in (quoted_value or token or "").split():
                 targets.append(url)
             params = params[param.end():]
     if len(set(targets)) > 1:
@@ -370,11 +370,19 @@ class GitHubReleaseClient:
         self._budget(state)
         self.sleep(min(2 ** min(retries, 2), 4))
 
-    def _page(self, url, state):
-        redirects, retries, visited = 0, 0, {url}
-        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": API_VERSION,
+    def _request_headers(self):
+        return {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": API_VERSION,
                    "User-Agent": f"CoveArchive/{__version__}", "Authorization": None, "Cookie": None,
                    "Proxy-Authorization": None}
+
+    _redirect_url = staticmethod(_redirect_url)
+
+    def _validate_transport(self, url, response=None):
+        pass
+
+    def _page(self, url, state):
+        redirects, retries, visited = 0, 0, {url}
+        headers = self._request_headers()
         while True:
             if getattr(self.session, "cookies", ()):
                 raise CredentialedSessionError()
@@ -383,8 +391,10 @@ class GitHubReleaseClient:
             response = None
             retry_transport = False
             try:
+                self._validate_transport(url)
                 response = self.session.get(url, headers=headers.copy(), timeout=self.timeout,
                     allow_redirects=False, stream=True, auth=_anonymous)
+                self._validate_transport(url, response)
                 status, response_headers = response.status_code, response.headers
                 body = b""
                 decisive = _rate_signal(response_headers)[-1]
@@ -416,7 +426,7 @@ class GitHubReleaseClient:
             if status in (301, 302, 307, 308):
                 if redirects >= self.max_redirects:
                     raise UnsafeRedirectError(status=status)
-                moved = _redirect_url(response_headers.get("Location"), url)
+                moved = self._redirect_url(response_headers.get("Location"), url)
                 if moved in visited:
                     raise UnsafeRedirectError(status=status)
                 visited.add(moved)

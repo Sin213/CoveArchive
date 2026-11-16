@@ -57,6 +57,20 @@ def run(source=(), **options):
     return plan_archive(source, **arguments)
 
 
+@pytest.mark.parametrize('reverse',[False,True])
+def test_provider_projects_and_repository_mismatch(monkeypatch,reverse):
+    from covearchive.archive import download
+    cb=RepositoryTarget('Owner','Repo','codeberg','codeberg.org')
+    github,codeberg=run([release()]),run([release()],repository=cb)
+    assert codeberg.project_dir==NativePath('codeberg.org/Owner/Repo') and github.project_dir==NativePath('Owner/Repo')
+    assert codeberg.releases[0].assets[0].path!=github.releases[0].assets[0].path
+    left,right=(github,codeberg) if reverse else (codeberg,github)
+    foreign=m.loads_index(m.dumps_index(right.index))
+    monkeypatch.setattr(download.store,'load_project_state',lambda p:SimpleNamespace(index=foreign,releases=(),unindexed=(),issues=()))
+    with pytest.raises(download.DownloadError,match='repository_mismatch'): download._state(None,left.repository,1)
+    with pytest.raises(PlanError,match='repository'): run([release()],repository=left.repository,index=foreign)
+
+
 def rejected(call, code, error=PlanError):
     try:
         call()

@@ -24,6 +24,95 @@ def item(i=1,root=native_root('C:/Archive'),**changes):
     r=Release(10,'v1',None,False,False,None,'',None,None,(a,),None,None)
     return RepositoryTarget('Owner','Repo'),r,a,root
 
+
+def memory_store():
+    from contextlib import contextmanager
+    c=sqlite3.connect(':memory:',isolation_level=None,check_same_thread=False); c.row_factory=sqlite3.Row
+    c.execute(q._SCHEMA); c.execute(q._COOLDOWNS); c.execute(f'PRAGMA application_id={q.APPLICATION_ID}'); c.execute('PRAGMA user_version=2')
+    store=object.__new__(q.QueueStore); store.path=Path(':memory:'); store.settings=m.QueueSettings(); store.clock=lambda:100
+    class Connection:
+        def execute(self,sql,*args): return c.execute("SELECT 'delete'") if sql=='PRAGMA journal_mode' else c.execute(sql,*args)
+        def commit(self): c.commit()
+        def rollback(self): c.rollback()
+    @contextmanager
+    def connection(): yield Connection()
+    store._connection=connection
+    return store,c
+
+def test_provider_jobs_memory_identity_and_claims():
+    store,c=memory_store(); repo,release,asset,root=item(); cb=replace(repo,provider='codeberg',host='codeberg.org')
+    try:
+        first=store.enqueue(repo,release,asset,root).job; second=store.enqueue(cb,release,asset,root).job
+        assert first.identity=='github|owner/repo|10|1|'+first.project_key.split('|')[0]
+        assert second.identity.startswith('codeberg|codeberg.org/owner/repo|') and first.project_key!=second.project_key
+        assert store.enqueue(cb,release,asset,root).job.job_id==second.job_id and first.job_id!=second.job_id
+        assert store.claim_next('runner').job_id==first.job_id and store.claim_next('runner').job_id==second.job_id
+        assert store.get(second.job_id).host=='codeberg.org'
+    finally: c.close()
+
+def test_provider_write_checks_are_cheap_and_strict():
+    store,c=memory_store(); statements=[]; c.set_trace_callback(statements.append)
+    try:
+        store.enqueue(*item())
+        assert not any('quick_check' in sql.lower() for sql in statements)
+        c.execute('ALTER TABLE jobs ADD COLUMN tampered TEXT')
+        with pytest.raises(m.QueueCorruptError): store.enqueue(*item(2))
+    finally: c.close()
+
+@pytest.mark.parametrize('provider,host',[('github','codeberg.org'),('codeberg','github.com'),('other','codeberg.org')])
+def test_provider_jobs_invalid_identity(provider,host):
+    args=item(); store=object.__new__(q.QueueStore)
+    with pytest.raises(m.InvalidJobError): store._validate(replace(args[0],provider=provider,host=host),*args[1:])
+
+
+def legacy_queue(c):
+    c.execute(q._SCHEMA_V1); c.execute(q._COOLDOWNS)
+    columns=[r[1] for r in c.execute('PRAGMA table_info(jobs)')]
+    for i,state in enumerate(S,1):
+        row=dict.fromkeys(columns); row.update(seq=i,job_id=f'job{i}',identity=f'github|owner/repo|10|{i}|root',provider='github',owner='Owner',repo='Repo',repo_key='owner/repo',release_id=10,asset_id=i,archive_root=native_root('C:/Archive'),project_key='root|owner/repo',tag_name='v1',asset_name='app.zip',asset_size=42,state=state.value,retry_count=3,last_error_code='network',next_attempt_at=300,claimed_by='old',stop_requested='pause',result_status='ARCHIVED',integrity='LOCAL_HASH_ONLY',transferred=1,created_at=100,updated_at=200)
+        c.execute('INSERT INTO jobs VALUES ('+','.join('?' for _ in columns)+')',[row[k] for k in columns])
+    c.execute("INSERT INTO cooldowns VALUES ('github',999)"); c.execute('PRAGMA user_version=1'); c.execute(f'PRAGMA application_id={q.APPLICATION_ID}'); c.commit()
+    return ','.join(columns),[tuple(r) for r in c.execute('SELECT * FROM jobs ORDER BY seq')]
+
+@pytest.mark.parametrize('failure',[False,True])
+def test_provider_migration_memory_transaction(monkeypatch,failure):
+    store,c=memory_store(); c.execute('DROP TABLE jobs'); c.execute('DROP TABLE cooldowns'); columns,rows=legacy_queue(c)
+    before=tuple(c.iterdump()); snapshot=store._migration_snapshot; calls=[]
+    def checksum(*a):
+        calls.append(1); value=snapshot(*a); return (0,b'bad') if failure and len(calls)==2 else value
+    monkeypatch.setattr(store,'_migration_snapshot',checksum)
+    try:
+        if failure:
+            with pytest.raises(m.QueueCorruptError):
+                with store._write(initializing=True) as wire: store._migrate(wire)
+            assert tuple(c.iterdump())==before
+        else:
+            with store._write(initializing=True) as wire: store._migrate(wire); store._check_schema(wire,2)
+            assert [tuple(r) for r in c.execute('SELECT '+columns+' FROM jobs ORDER BY seq')]==rows
+            assert {j.state for j in store.list_jobs()}==set(S) and all(j.host=='github.com' for j in store.list_jobs())
+            assert store.cooldown_until()==999 and c.execute('PRAGMA user_version').fetchone()[0]==2
+    finally: c.close()
+
+@pytest.mark.parametrize('mode',['success','checksum','busy'])
+def test_provider_migration_native(tmp_path,monkeypatch,mode):
+    from contextlib import nullcontext
+    path=tmp_path/'v1.db'
+    with sqlite3.connect(path) as c: columns,rows=legacy_queue(c)
+    before=path.read_bytes(); original=q.QueueStore._migration_snapshot; calls=[]
+    def checksum(self,*a):
+        calls.append(1); value=original(self,*a); return (0,b'bad') if mode=='checksum' and len(calls)==2 else value
+    monkeypatch.setattr(q.QueueStore,'_migration_snapshot',checksum)
+    with q.RunnerLock(path) if mode=='busy' else nullcontext():
+        if mode=='success':
+            store=q.QueueStore(path); assert {j.state for j in store.list_jobs()}==set(S) and store.cooldown_until()==999
+        else:
+            with pytest.raises(m.QueueBusyError if mode=='busy' else m.QueueCorruptError): q.QueueStore(path)
+            assert path.read_bytes()==before
+    with sqlite3.connect(path) as c:
+        assert c.execute('PRAGMA user_version').fetchone()[0]==(2 if mode=='success' else 1)
+        assert c.execute('PRAGMA application_id').fetchone()[0]==q.APPLICATION_ID
+        assert c.execute('SELECT '+columns+' FROM jobs ORDER BY seq').fetchall()==rows
+
 @pytest.fixture
 def db(tmp_path): return q.QueueStore(tmp_path/'jobs.db',clock=lambda:100)
 
@@ -33,7 +122,7 @@ def test_Q01_Q02_Q05_creation_reopen(tmp_path):
     assert e.job.created_at==100 and len(e.job.job_id)==32
     assert q.QueueStore(path).get(e.job.job_id)==e.job
     with sqlite3.connect(path) as c:
-        assert c.execute('pragma user_version').fetchone()==(1,)
+        assert c.execute('pragma user_version').fetchone()==(2,)
         assert c.execute('pragma journal_mode').fetchone()==('delete',)
 
 @pytest.mark.parametrize('action,state',[('pause',S.PAUSED),('cancel',S.CANCELLED)])
@@ -136,7 +225,7 @@ def test_Q25_untouched(tmp_path,kind):
     else:
         q.QueueStore(path)
         if kind=='newer':
-            with sqlite3.connect(path) as c: c.execute('pragma user_version=2')
+            with sqlite3.connect(path) as c: c.execute('pragma user_version=3')
         else: path.write_bytes(path.read_bytes()[:150])
     before=hashlib.sha256(path.read_bytes()).digest(); siblings=set(tmp_path.iterdir())
     with pytest.raises(m.QueueVersionError if kind=='newer' else m.QueueCorruptError) as err: q.QueueStore(path)
@@ -286,7 +375,7 @@ def test_Q01_fresh_process_open_race(tmp_path):
 
 @pytest.mark.parametrize('operation',['enqueue','claim','recover'])
 def test_Q25_F1_live_version_guard(db,operation):
-    with sqlite3.connect(db.path) as c: c.execute('PRAGMA user_version=2')
+    with sqlite3.connect(db.path) as c: c.execute('PRAGMA user_version=3')
     before=db.path.read_bytes()
     with pytest.raises(m.QueueVersionError):
         {'enqueue':lambda:db.enqueue(*item()),'claim':lambda:db.claim_next('a'),'recover':db.recover_interrupted}[operation]()
@@ -364,3 +453,46 @@ def test_auto_archive_enqueue_completed_manual_default_unchanged(db):
     assert db.enqueue_many([item()],requeue_completed=False)[0].job==before
     result=db.enqueue_many([item()])[0]
     assert result.outcome=='requeued' and result.job.state==S.QUEUED and result.job.retry_count==0
+
+@pytest.mark.parametrize('links',[1,2])
+def test_provider_migration_alias_boundary(monkeypatch,links):
+    import io
+    monkeypatch.setattr(Path,'is_file',lambda p:True); monkeypatch.setattr(Path,'open',lambda *a,**k:io.BytesIO(b'SQLite format 3\0'+b'\0'*44+b'\0\0\0\1'+b'\0'*8))
+    monkeypatch.setattr(Path,'mkdir',lambda *a,**k:None); monkeypatch.setattr(Path,'stat',lambda *a,**k:NS(st_nlink=links))
+    calls=[]
+    def lock(path):
+        calls.append(path); assert Path(path)==Path('alias.db')
+        raise m.QueueBusyError('runner_active')
+    monkeypatch.setattr(q,'RunnerLock',lock)
+    with pytest.raises(m.QueueBusyError if links==1 else m.QueueError) as caught: q.QueueStore('alias.db')
+    assert str(caught.value)==('runner_active' if links==1 else 'database_unavailable') and len(calls)==(1 if links==1 else 0)
+
+@pytest.mark.parametrize('held,opened',[('alias.db','canonical.db'),('canonical.db','alias.db'),('alias.db','other.db')])
+def test_provider_runner_lock_alias_identity(monkeypatch,held,opened):
+    import builtins
+    canonical=str(Path('canonical.db').absolute()); calls=[]
+    monkeypatch.setattr(q.os.path,'realpath',lambda p:canonical)
+    def open_lock(path,*a,**k):
+        calls.append(str(path)); raise m.QueueBusyError('runner_active')
+    monkeypatch.setattr(builtins if sys.platform=='win32' else q.os,'open',open_lock)
+    for path in (held,opened):
+        with pytest.raises(m.QueueBusyError,match='runner_active'): q.RunnerLock(path)
+    assert calls==[canonical+'.lock']*2
+
+@pytest.mark.parametrize('kind',['canonical-alias','alias-canonical','aliases','hardlink'])
+def test_provider_migration_native_alias(tmp_path,kind):
+    path=tmp_path/'v1.db'; alias=tmp_path/'alias.db'; other=tmp_path/'other.db'
+    with sqlite3.connect(path) as c: legacy_queue(c)
+    before=path.read_bytes()
+    try:
+        if kind=='hardlink': q.os.link(path,alias)
+        else: alias.symlink_to(path); other.symlink_to(path)
+    except (OSError,NotImplementedError): pytest.skip('native links unavailable')
+    held,opened=(alias,path) if kind=='alias-canonical' else (alias,other) if kind=='aliases' else (path,alias)
+    with q.RunnerLock(held):
+        with pytest.raises(m.QueueBusyError if kind!='hardlink' else m.QueueError) as caught:
+            if kind=='aliases':
+                with q.RunnerLock(opened): pass
+            else: q.QueueStore(opened)
+        assert str(caught.value)==('database_unavailable' if kind=='hardlink' else 'runner_active')
+    assert path.read_bytes()==alias.read_bytes()==before

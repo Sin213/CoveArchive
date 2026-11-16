@@ -8,16 +8,17 @@ import sys
 import threading
 
 from covearchive.github.models import ReleaseCatalog, parse_release
-from covearchive.github.urls import GitHubUrlError, RepositoryTarget, ReleaseTagTarget, parse_github_url
+from covearchive.github.urls import GitHubUrlError, RepositoryTarget, ReleaseTagTarget
+from covearchive.providers import parse_repository_url, validate_repository
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 MAX_REQUEST_BYTES = 4096
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 DEFAULT_DEADLINE_SECONDS = 180
 ERROR_CODES = frozenset("invalid_target credentialed_session not_found unauthorized forbidden rate_limited "
     "server_error timeout network invalid_json invalid_root too_many_items invalid_release response_too_large "
     "bad_pagination unsafe_redirect gone unexpected_status incomplete_scan github_api_error invalid_url "
-    "unsupported_target bad_request result_too_large internal_error".split())
+    "unsupported_target bad_request result_too_large internal_error invalid_content_type".split())
 RELEASE_KEYS = frozenset("id tag_name name draft prerelease immutable created_at published_at body assets tarball_url zipball_url".split())
 ASSET_KEYS = frozenset("id name size state content_type browser_download_url digest created_at updated_at".split())
 
@@ -88,7 +89,7 @@ def _dump(obj):
 
 
 def encode_request(request_id, url):
-    data = _dump(dict(protocol=1, request_id=request_id, action="scan", url=url))
+    data = _dump(dict(protocol=PROTOCOL_VERSION, request_id=request_id, action="scan", url=url))
     parse_request(data)
     return data
 
@@ -96,7 +97,7 @@ def encode_request(request_id, url):
 def parse_request(line):
     obj = _load(line, MAX_REQUEST_BYTES)
     _keys(obj, ("protocol", "request_id", "action", "url"))
-    _require(type(obj["protocol"]) is int and obj["protocol"] == 1 and obj["action"] == "scan")
+    _require(type(obj["protocol"]) is int and obj["protocol"] == PROTOCOL_VERSION and obj["action"] == "scan")
     _id(obj["request_id"]); _text(obj["url"], 2048)
     return obj["request_id"], obj["url"]
 
@@ -112,8 +113,9 @@ def encode_success(request_id, catalog):
     if not catalog.complete:
         return encode_error(request_id, "incomplete_scan", detail=dict(pages_completed=catalog.pages,
                             reason="incomplete", cause_code=None))
-    data = _dump(dict(protocol=1, request_id=request_id, status="ok", result=dict(
-        owner=catalog.repository.owner, repo=catalog.repository.repo, pages=catalog.pages,
+    repository = validate_repository(catalog.repository)
+    data = _dump(dict(protocol=PROTOCOL_VERSION, request_id=request_id, status="ok", result=dict(
+        owner=repository.owner, repo=repository.repo, provider=repository.provider, host=repository.host, pages=catalog.pages,
         requests=catalog.requests, redirects=catalog.redirects,
         duplicate_release_ids=list(catalog.duplicate_release_ids),
         releases=[_release_wire(release) for release in catalog.releases])))
@@ -134,7 +136,7 @@ def encode_error(request_id, exc_or_code, **fields):
         detail = dict(pages_completed=getattr(exc_or_code, "pages_completed", 0),
                       reason=getattr(exc_or_code, "reason", "incomplete")[:200],
                       cause_code=getattr(getattr(exc_or_code, "cause", None), "code", None))
-    return _dump(dict(protocol=1, request_id=request_id, status="error", error=dict(
+    return _dump(dict(protocol=PROTOCOL_VERSION, request_id=request_id, status="error", error=dict(
         code=code, http_status=fields.get("http_status", getattr(exc_or_code, "status", None)),
         message="Scan failed: " + code, detail=fields.get("detail", detail))))
 
@@ -156,7 +158,7 @@ def decode_response(data, expected_request_id):
         _require(type(obj) is dict and obj.get("status") in ("ok", "error"))
         body = "result" if obj["status"] == "ok" else "error"
         _keys(obj, ("protocol", "request_id", "status", body))
-        _require(type(obj["protocol"]) is int and obj["protocol"] == 1)
+        _require(type(obj["protocol"]) is int and obj["protocol"] == PROTOCOL_VERSION)
         _id(obj["request_id"])
         _require(obj["request_id"] == expected_request_id)
         item = obj[body]
@@ -178,10 +180,10 @@ def decode_response(data, expected_request_id):
                 _int(detail["pages_completed"]); _text(detail["reason"], 200)
                 _require(detail["cause_code"] is None or detail["cause_code"] in ERROR_CODES)
             return ScanFailure(obj["request_id"], code, item["http_status"], item["message"], detail)
-        _keys(item, ("owner", "repo", "pages", "requests", "redirects", "duplicate_release_ids", "releases"))
-        _text(item["owner"], 39); _text(item["repo"], 100)
-        target = parse_github_url(f"https://github.com/{item['owner']}/{item['repo']}")
-        _require(target == RepositoryTarget(item["owner"], item["repo"]))
+        _keys(item, ("owner", "repo", "provider", "host", "pages", "requests", "redirects", "duplicate_release_ids", "releases"))
+        _text(item["owner"], 40); _text(item["repo"], 100)
+        _text(item["provider"], 16); _text(item["host"], 253)
+        target = validate_repository(RepositoryTarget(item["owner"], item["repo"], item["provider"], item["host"]))
         for key in ("pages", "requests", "redirects"): _int(item[key])
         _require(type(item["duplicate_release_ids"]) is list and len(item["duplicate_release_ids"]) <= 10000)
         for value in item["duplicate_release_ids"]: _int(value)
@@ -204,12 +206,18 @@ def decode_response(data, expected_request_id):
 
 def run_scan(request_id, url, *, client_factory=None):
     # Importing this module must remain possible without requests or Qt installed.
-    from covearchive.github.client import GitHubReleaseClient
     try:
-        target = parse_github_url(url)
+        target = parse_repository_url(url)
         if isinstance(target, ReleaseTagTarget):
             return json.loads(encode_error(request_id, "unsupported_target"))
-        with (client_factory or GitHubReleaseClient)() as client:
+        if client_factory is None:
+            if target.provider == "codeberg":
+                from covearchive.forgejo import ForgejoReleaseClient
+                client_factory = ForgejoReleaseClient
+            else:
+                from covearchive.github.client import GitHubReleaseClient
+                client_factory = GitHubReleaseClient
+        with client_factory() as client:
             data = encode_success(request_id, client.discover_releases(target))
     except GitHubUrlError:
         data = encode_error(request_id, "invalid_url")

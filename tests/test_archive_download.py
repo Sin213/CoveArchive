@@ -31,6 +31,13 @@ def project(root): return root / "Owner" / "Repo"
 def folder(root): return project(root) / "release-v1--10"
 def no_temps(root): assert not list(root.rglob("*.part"))
 
+@pytest.mark.parametrize('state',['external','missing'])
+def test_codeberg_selection_rejected_without_filesystem(state):
+    selected=replace(asset(),state='external') if state=='external' else asset()
+    source=release(selected,assets=() if state=='missing' else (selected,))
+    result=d.archive_asset(RepositoryTarget('Owner','Repo','codeberg','codeberg.org'),source,selected,'unused')
+    assert result.code=='asset_unavailable'
+
 def test_D01_download_and_persist(rig):
     result=run(rig)
     assert result is not None, "archive_asset must download and return a structured outcome"
