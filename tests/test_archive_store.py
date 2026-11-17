@@ -1036,12 +1036,15 @@ def test_r1_unindexed_manifest_retention_is_bounded(tmp_path, monkeypatch):
 
 def test_docs_claims_manifest_replacement_limitations():
     readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
-    for text in (readme, store.__doc__):
-        normalized = " ".join(text.split())
-        assert "may overwrite" in normalized
-        assert "a replacement race is detected after publication" not in normalized
-        assert "detect namespace changes on a best-effort basis" not in normalized
-    assert "Known limitations carried forward" in readme
+    normalized = " ".join(store.__doc__.split())
+    assert "may overwrite" in normalized
+    assert "a replacement race is detected after publication" not in normalized
+    assert "detect namespace changes on a best-effort basis" not in normalized
+    normalized = " ".join(readme.split())
+    assert "may overwrite" in normalized
+    assert "guaranteed compare-and-replace" not in normalized
+    assert "atomic compare-and-replace is guaranteed" not in normalized
+    assert "protects against concurrent" not in normalized
 
 
 def _r3a_enable_case_sensitive(directory):

@@ -2,9 +2,11 @@
 
 import ast
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tomllib
+from urllib.parse import unquote, urlsplit
 
 import pytest
 
@@ -103,32 +105,62 @@ def test_allowlisted_files_exist_are_utf8_and_use_lf(relative_path):
 @pytest.mark.parametrize(
     "statement",
     [
-        "local preservation of GitHub project releases",
-        "pre-alpha, slice CA-S3",
-        "bootstrap",
-        "URL classifier",
-        "format matcher",
+        "local preservation of public project releases",
+        "| GitHub |",
+        "| Codeberg |",
+        "| GitLab.com |",
+        "**Browse**",
+        "**Queue**",
+        "**Library**",
+        "Auto-Archive",
+        "Non-deletion guarantee",
+        "Cove Nexus is not required",
+        "Installers and\nrelease binaries are not available yet",
+        "python run_covearchive.py",
+        "Windows Credential Manager",
+        "KWallet",
+        "Archive Git History",
+        "--ref-format=reftable",
+        "Bundles exclude pull-request and merge-request refs, Git LFS file contents and\n"
+        "submodule repository contents",
+        "AppImage",
+        "TAR.GZ",
+        "7z",
+        "| EXE | `.exe` | Off; opt in |",
+        "| MSI | `.msi` | Off; opt in |",
         ".appimage",
         ".tar.gz",
         ".tar",
         ".dmg",
         ".zip",
         ".7z",
-        "case-insensitively",
-        "FUTURE",
-        "not implemented",
-        "official GitHub REST API",
-        "per-release folders",
+        "Suffix matching is case-insensitive for ASCII letters",
+        "archive-index.json",
+        "release.json",
         "Resume",
-        "Rescan",
-        "without duplicating",
-        "not a complete Git history backup",
-        "downloads are never automatically executed or extracted",
+        "Existing completed files are verified before being reused by an archive job",
+        "Downloads are never executed or extracted",
         "python -m pytest",
     ],
 )
 def test_readme_required_statements(statement):
     assert statement in (ROOT / "README.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "forbidden",
+    ["pre-alpha", "CA-S", "CA-A1", "slice", "C:\\Users", "/home/", "!["],
+)
+def test_readme_excludes_internal_details_and_images(forbidden):
+    assert forbidden not in (ROOT / "README.md").read_text(encoding="utf-8")
+
+
+def test_readme_relative_links_exist():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for target in re.findall(r"(?<!!)\[[^\]]+\]\(([^)\s]+)\)", readme):
+        link = urlsplit(target)
+        if not link.scheme and not link.netloc and link.path:
+            assert (ROOT / unquote(link.path)).exists(), target
 
 
 def test_mit_license():
