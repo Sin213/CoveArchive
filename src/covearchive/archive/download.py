@@ -151,7 +151,7 @@ def _observed(chunks, progress, total):
 
 
 def archive_asset(repository, release, asset, archive_root, *, policy=None, session=None,
-                  cancel=None, sleep=time.sleep, clock=time.monotonic, progress=None):
+                  cancel=None, sleep=time.sleep, clock=time.monotonic, progress=None, auth=None):
     """Archive one identity-bound asset; expected failures return URL-free results.
 
     Completed JSON is always reverified. Planned files without publisher hashes
@@ -248,7 +248,7 @@ def archive_asset(repository, release, asset, archive_root, *, policy=None, sess
                                 return replace(result,status=ArchiveStatus.MISMATCH,code="publisher_digest_mismatch")
                             result = replace(result,change="MISSING")
                     if completed is None:
-                        with open_asset_stream(repository,asset,release=release,policy=policy,session=session,cancel=cancel,sleep=sleep,clock=clock) as chunks:
+                        with open_asset_stream(repository,asset,release=release,policy=policy,session=session,cancel=cancel,sleep=sleep,clock=clock,auth=auth) as chunks:
                             result = replace(result,transferred=True)
                             if progress is not None: chunks = _observed(chunks,progress,asset.size)
                             outcome = store.write_asset(directory,record.saved_name,chunks,record.size,

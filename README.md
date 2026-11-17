@@ -484,3 +484,15 @@ Operations have deadlines, cancellation, bounded output, a 20,000-ref limit, an 
 working-size limit and free-disk checks. Cancellation stops the process tree and cleans
 temporary files; once final manifest publication begins, the operation completes.
 The app does not check out repository content or run its hooks, submodules or LFS filters.
+
+## GitHub access token
+
+A token is optional; anonymous access continues to work. Add or clear a token in
+Settings under GitHub Access. Windows uses Credential Manager; Linux uses KWallet
+6 or 5 when available and unlocked. Otherwise the token stays in memory for the
+current session only. Tokens are sent only to `api.github.com`, never to download
+redirects, Codeberg, or GitLab, and never stored in preferences or the queue.
+
+CoveArchive uses the token only for repositories GitHub reports public via one authenticated visibility check; otherwise release and asset requests stay anonymous.
+
+While KWallet is unavailable, any saved token is not used and cannot be cleared.

@@ -13,6 +13,7 @@ import requests
 from covearchive import __version__
 from covearchive.jsondepth import check_json_depth
 
+from .token import RateLimit, valid_token
 from .models import ReleaseCatalog, ReleaseSchemaError, parse_release
 from .urls import RepositoryTarget, ReleaseListTarget, ReleaseTagTarget, parse_github_url
 
@@ -68,8 +69,9 @@ class NotFoundError(GitHubApiError):
 
 
 class AccessDeniedError(GitHubApiError):
-    def __init__(self, status=403):
+    def __init__(self, status=403, *, token_rejected=False):
         super().__init__(status=status, code="unauthorized" if status == 401 else "forbidden")
+        self.token_rejected = status == 401 and token_rejected
 
 
 class RateLimitError(GitHubApiError):
@@ -144,6 +146,21 @@ def _integer(value):
         except ValueError:
             pass
     return None
+
+
+def is_public_repository(data):
+    return isinstance(data, dict) and data.get('private') is False and data.get('visibility') == 'public'
+
+
+def observe_rate(auth, headers, token_sent, clock=time.time):
+    """Observe only complete integer GitHub rate headers; never disrupt I/O."""
+    if auth is None: return
+    try:
+        values = [_integer(headers.get("X-RateLimit-" + name))
+                  for name in ("Limit", "Remaining", "Reset")]
+        if all(value is not None for value in values):
+            auth.observe(RateLimit(*values, token_sent is not None, clock()), token_sent)
+    except Exception: pass
 
 
 def _rate_signal(headers):
@@ -299,7 +316,7 @@ class GitHubReleaseClient:
 
     def __init__(self, session=None, *, clock=time.time, sleep=time.sleep,
                  timeout=DEFAULT_TIMEOUT, max_pages=100, max_requests=150,
-                 max_retries=2, max_redirects=3, max_response_bytes=DEFAULT_MAX_RESPONSE_BYTES):
+                 max_retries=2, max_redirects=3, max_response_bytes=DEFAULT_MAX_RESPONSE_BYTES, auth=None):
         if isinstance(session, requests.Session) and not isinstance(session, DirectSession):
             raise TypeError("Pass DirectSession instead of a stock requests.Session.")
         self._owns_session, self._closed = session is None, False
@@ -308,6 +325,7 @@ class GitHubReleaseClient:
         self.max_pages, self.max_requests = max_pages, max_requests
         self.max_retries, self.max_redirects = max_retries, max_redirects
         self.max_response_bytes = max_response_bytes
+        self.auth = auth if type(self) is __class__ else None
 
     def close(self):
         """Close an owned session; leave injected sessions with their caller."""
@@ -331,8 +349,19 @@ class GitHubReleaseClient:
                 raise ValueError("Non-canonical target.")
         except (ValueError, TypeError, UnicodeError, OverflowError) as exc:
             raise InvalidTargetError() from exc
-        state = dict(pages=0, requests=0, redirects=0)
+        state = dict(pages=0, requests=0, redirects=0, public_token=None)
         url = f"{API_ROOT}/repos/{repository.owner}/{repository.repo}/releases?per_page=100"
+        if self.auth is not None and valid_token(self.auth.token()):
+            token, public = self.auth.token(), False
+            state["public_token"] = token
+            probe = f"{API_ROOT}/repos/{repository.owner}/{repository.repo}"
+            try:
+                final, _, body = self._page(probe, state)
+                data = _json(body)
+                public = (final == probe and is_public_repository(data) and self.auth.token() == token
+                          and getattr(self.session, 'verify', True) not in (False, None))
+            except (GitHubApiError, ValueError, TypeError, UnicodeError, OverflowError, RecursionError): pass
+            state['public_token'] = token if public else None
         releases, seen, duplicates, visited = [], set(), [], set()
         while True:
             if state["pages"] >= self.max_pages:
@@ -392,10 +421,30 @@ class GitHubReleaseClient:
             retry_transport = False
             try:
                 self._validate_transport(url)
+                sent_token = None
+                def request_auth(request):
+                    nonlocal sent_token
+                    for name in ("Authorization", "Cookie", "Proxy-Authorization"):
+                        request.headers.pop(name, None)
+                    parts = urlsplit(request.url)
+                    if (self.auth is not None and redirects == 0
+                            and getattr(self.session, 'verify', True) not in (False, None)
+                            and parts.scheme == "https" and parts.netloc == "api.github.com"
+                            and urlsplit(url).scheme == "https" and urlsplit(url).netloc == "api.github.com"):
+                        candidate = self.auth.token()
+                        if valid_token(candidate) and candidate == state.get("public_token"):
+                            sent_token = candidate
+                            request.headers["Authorization"] = "Bearer " + candidate
+                    return request
                 response = self.session.get(url, headers=headers.copy(), timeout=self.timeout,
-                    allow_redirects=False, stream=True, auth=_anonymous)
+                    allow_redirects=False, stream=True, auth=request_auth if self.auth is not None else _anonymous)
                 self._validate_transport(url, response)
                 status, response_headers = response.status_code, response.headers
+                if self.auth is not None:
+                    observe_rate(self.auth, response_headers, sent_token, self.clock)
+                    if status == 401 and sent_token is not None:
+                        try: self.auth.reject(sent_token)
+                        except Exception: pass
                 body = b""
                 decisive = _rate_signal(response_headers)[-1]
                 if status == 200 or (status == 403 and not decisive):
@@ -445,7 +494,7 @@ class GitHubReleaseClient:
                 if rate_limit is not None:
                     raise rate_limit
             if status in (401, 403):
-                raise AccessDeniedError(status)
+                raise AccessDeniedError(status, token_rejected=sent_token is not None)
             if status == 404:
                 raise NotFoundError()
             if status == 410:

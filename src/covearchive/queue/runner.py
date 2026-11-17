@@ -1,5 +1,6 @@
 """Bounded calling-thread scheduler over the archive pipeline."""
 from dataclasses import dataclass
+from functools import partial
 import random
 import math
 import threading
@@ -52,14 +53,15 @@ class _Control:
     window_at: float | None=None
     window_bytes: int=0
 
-def _catalog(repository):
+def _catalog(repository, *, auth=None):
     from covearchive.providers import validate_repository
     validate_repository(repository)
     if repository.provider=='codeberg':
         from covearchive.forgejo import ForgejoReleaseClient as Client
     else:
         from covearchive.github.client import GitHubReleaseClient as Client
-    with Client() as client: return client.discover_releases(repository)
+    options = {'auth': auth} if repository.provider == 'github' and auth is not None else {}
+    with Client(**options) as client: return client.discover_releases(repository)
 
 def _resolve(repository,tag):
     from covearchive.gitlab import GitLabReleaseClient
@@ -70,6 +72,8 @@ def _catalog_error(exc):
     from covearchive.github import client as g
     if isinstance(exc,g.IncompleteScanError):
         return _catalog_error(exc.cause) if exc.cause is not None else Outcome('failed','incomplete_scan')
+    if isinstance(exc,g.AccessDeniedError) and exc.status==401:
+        return Outcome('failed','unauthorized' if getattr(exc,'token_rejected',False) else 'forbidden')
     if isinstance(exc,g.RateLimitError): return Outcome('retry','rate_limited',exc.retry_after_seconds)
     if isinstance(exc,g.TransientServerError): return Outcome('retry' if exc.status in (500,502,503,504) else 'failed','server_error')
     if isinstance(exc,(g.RequestTimeoutError,g.NetworkError)): return Outcome('retry',safe_code(exc.code))
@@ -79,9 +83,9 @@ def _catalog_error(exc):
 
 class QueueRunner:
     def __init__(self,store,*,settings=None,archive=None,catalog=None,resolve=None,policy=None,clock=time.time,
-            monotonic=time.monotonic,sleep=time.sleep,rng=random.random):
+            monotonic=time.monotonic,sleep=time.sleep,rng=random.random,auth=None):
         self.store=store; self.settings=settings or store.settings
-        self.archive=archive; self.catalog=catalog or _catalog; self.resolve=resolve or _resolve; self.policy=policy
+        self.archive=archive; self.auth=auth; self.catalog=catalog or partial(_catalog,auth=auth); self.resolve=resolve or _resolve; self.policy=policy
         self.clock=clock; self.monotonic=monotonic; self.sleep=sleep; self.rng=rng
         self._owner=uuid.uuid4().hex; self._state=threading.RLock(); self._wake=threading.Event()
         self._active={}; self._cache={}; self._catalog_locks={}; self._lock=None
@@ -99,6 +103,9 @@ class QueueRunner:
             if value is None or expired or stale:
                 try: value=(self.catalog(repository) if tag is None else self.resolve(repository,tag),None)
                 except Exception as exc: value=(None,_catalog_error(exc))
+                if value[1] is not None and value[1].code=='unauthorized':
+                    self._cache.pop(key,None)
+                    return (*value,now)
                 self._cache[key]=(*value,now,self.clock())
             return self._cache[key][:3]
 
@@ -150,7 +157,7 @@ class QueueRunner:
                             archive=self.archive
                             if archive is None:
                                 from covearchive.archive.download import archive_asset
-                                archive=archive_asset
+                                archive=partial(archive_asset,auth=self.auth)
                             self._guard_cooldown()
                             result=archive(repository,release,asset,job.archive_root,policy=self.policy,session=None,
                                 cancel=lambda:self._cancelled(control),sleep=self.sleep,clock=self.monotonic,

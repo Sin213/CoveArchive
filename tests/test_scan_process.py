@@ -212,7 +212,8 @@ def test_R4_process_diagnostic_tail(rig):
 
 
 def test_R7_default_worker_roundtrip():
-    c=ScanController(ROOT/"run_covearchive.py"); events=[]; pids=[]
+    from covearchive.github.token import StaticAuth
+    c=ScanController(ROOT/"run_covearchive.py",auth=StaticAuth("ghp_"+"A"*36)); events=[]; pids=[]
     c.terminal.connect(lambda *args:events.append(args)); begin=len(QT_MESSAGES)
     try:
         assert c.start(URL+"/releases/tag/v1")
@@ -250,3 +251,132 @@ def test_C1_terminal_slot_can_rescan(rig):
     c.terminal.connect(lambda *args: started.append(c.start(URL)) if len(events)==1 else None)
     c.start(URL); until(lambda:bool(started))
     assert started==[True] and c.job is not None
+
+
+@pytest.mark.parametrize('provider', ['github', 'codeberg', 'gitlab'])
+def test_token_stdin_only_and_provider_guard(rig, provider, caplog):
+    from covearchive.github.token import GitHubAuth
+    auth = GitHubAuth(None); token = 'ghp_'+'A'*36; auth.save(token)
+    script = ("import sys,json,time;r=json.loads(sys.stdin.buffer.readline());"
+              + ("assert r['github_token']=='ghp_'+'A'*36;" if provider=='github' else "assert 'github_token' not in r;")
+              + "sys.stderr.write(r.get('github_token','')+'TAIL');sys.stderr.flush();time.sleep(.1);sys.exit(3)")
+    c, events = rig(script, auth=auth)
+    host = dict(github='github.com',codeberg='codeberg.org',gitlab='gitlab.com')[provider]
+    assert c.start(f'https://{host}/Owner/Repo'); job = c.job
+    assert token not in repr(job)
+    assert token not in job.process.program()
+    assert token not in str(job.process.arguments()) and token not in str(job.process.processEnvironment().toStringList())
+    until(lambda: events)
+    assert events[0][2].code == 'process'
+    assert token not in str(events[0][2]) and token not in repr(job) and token not in caplog.text
+    assert events[0][2].detail['stderr'].endswith('TAIL')
+
+
+@pytest.mark.parametrize('mode',['redirect','first','later','success','probe','probe_missing'])
+def test_controller_explicit_worker_provenance(rig,mode):
+    from covearchive.github.token import GitHubAuth
+    from test_github_token import Vault,TOKEN
+    auth=GitHubAuth(Vault()); auth.save(TOKEN)
+    c,events=rig(later_401_script(mode),auth=auth); c.start(URL); until(lambda:events)
+    result=events[0][2]; rejected=mode in ('first','later','probe','probe_missing')
+    assert auth.status().state==('REJECTED' if rejected else 'SAVED')
+    assert getattr(result,'token_rejected',False)==rejected
+    if mode=='success': assert auth.rate is not None and auth.rate.authenticated
+    elif mode.startswith('probe'): assert auth.rate is not None and not auth.rate.authenticated
+    if mode=='probe': assert events[0][1]=='COMPLETED' and auth.token() is None
+    elif mode!='success' and not mode.startswith('probe'): assert auth.rate is None
+    if mode=='redirect': assert result.rate_limit['authenticated'] is False
+
+def test_tag_with_auth_is_unsupported_without_token(rig):
+    from covearchive.github.token import GitHubAuth
+    auth = GitHubAuth(None); auth.save('ghp_'+'A'*36)
+    script = reply().replace("'not_found'", "'unsupported_target'").replace(
+        "r=json.loads(sys.stdin.buffer.readline());", "r=json.loads(sys.stdin.buffer.readline());assert 'github_token' not in r;")
+    c, events = rig(script, auth=auth)
+    assert c.start(URL+'/releases/tag/v1'); until(lambda: events)
+    assert events[0][2].code == 'unsupported_target'
+
+def later_401_script(mode='later'):
+    return f"""
+import sys,json
+sys.path[:0]=[{str(ROOT/'src')!r},{str(ROOT/'tests')!r}]
+from covearchive import scan_worker as w
+import covearchive.github.client as github
+from test_github_client import real_transport,link,page,ROOT
+r=json.loads(sys.stdin.buffer.readline())
+rate={{'X-RateLimit-Limit':'5000','X-RateLimit-Remaining':'4999','X-RateLimit-Reset':'9999999999'}}
+scripts={{'redirect':[(302,{{'Location':ROOT+'/repositories/1/releases'}},None),(401,rate,None)],
+'first':[(401,rate,None)],'later':[(200,{{'Link':link(page(2))}},None),(401,rate,None)],'success':[(200,rate,None)],'probe':[(401,rate,None),(200,rate,None)],'probe_missing':[(401,rate,None),(404,rate,None)]}}
+session,client,calls,_=real_transport(scripts[{mode!r}],probe=not {mode!r}.startswith('probe'))
+def factory(*,auth): client.auth=auth; return client
+github.GitHubReleaseClient=factory
+result=w.run_scan(r['request_id'],r['url'],token=r.get('github_token'))
+assert [bool(q.headers.get('Authorization')) for q in calls]==([True,False] if {mode!r}=='redirect' or {mode!r}.startswith('probe') else [True]*len(calls))
+sys.stdout.buffer.write(w._dump(result));sys.stdout.buffer.flush()
+"""
+
+@pytest.mark.parametrize('mode',['later','probe'])
+def test_later_page_401_rejects_controller_token(rig,mode):
+    from covearchive.github.token import GitHubAuth
+    auth=GitHubAuth(None); auth.save('ghp_'+'A'*36)
+    c,events=rig(later_401_script(mode),auth=auth); assert c.start(URL); until(lambda:events)
+    failure=events[0][2]
+    if mode=='later': assert failure.code=='incomplete_scan' and failure.detail['cause_code']=='unauthorized'
+    assert auth.status().state=='REJECTED' and auth.token() is None
+    c.command_factory=command(reply().replace('r=json.loads(sys.stdin.buffer.readline());',
+        "r=json.loads(sys.stdin.buffer.readline());assert 'github_token' not in r;"))
+    c.start(URL); until(lambda:len(events)==2)
+    assert events[1][2].code=='not_found'
+
+@pytest.mark.parametrize('host',['codeberg.org','gitlab.com'])
+def test_foreign_rate_failure_preserves_github_rate(rig,host):
+    from covearchive.github.token import GitHubAuth, RateLimit
+    auth=GitHubAuth(None); rate=RateLimit(5000,4000,12345,True,100); auth.observe(rate,None)
+    script=reply().replace("encode_error(r['request_id'],'not_found')",
+        "encode_error(r['request_id'],'rate_limited',detail=dict(kind='primary',retry_after_seconds=10,retry_at=100,remaining=0,reset_at=123))")
+    c,events=rig(script,auth=auth); c.start('https://'+host+'/Owner/Repo'); until(lambda:events)
+    assert events[0][2].code=='rate_limited' and auth.rate==rate
+
+def test_revoke_token_uses_existing_cancel_and_reap(rig):
+    from covearchive.github.token import GitHubAuth
+    auth=GitHubAuth(None); auth.save('ghp_'+'A'*36)
+    c,events=rig(auth=auth); c.start(URL); until(lambda:c.job.process.processId()>0)
+    pid=c.job.process.processId(); auth.clear(); c.revoke_token(); until(lambda:events)
+    assert events[0][1]=='CANCELLED' and gone(pid) and c.job is None
+    c.command_factory=command(reply().replace('r=json.loads(sys.stdin.buffer.readline());',
+        "r=json.loads(sys.stdin.buffer.readline());assert 'github_token' not in r;"))
+    c.start(URL); until(lambda:len(events)==2); assert events[1][2].code=='not_found'
+
+@pytest.mark.parametrize('host,authenticated',[('github.com',True),('codeberg.org',True),('codeberg.org',False)])
+def test_controller_ignores_forged_authenticated_observation(rig,host,authenticated):
+    from covearchive.github.token import GitHubAuth
+    auth=GitHubAuth(None)
+    script=reply().replace("encode_error(r['request_id'],'not_found')",
+        "encode_error(r['request_id'],'unauthorized',token_rejected=True,rate_limit=dict(limit=5000,remaining=1,reset=9999999999,authenticated=True))")
+    script=script.replace('authenticated=True',f'authenticated={authenticated!r}')
+    c,events=rig(script,auth=auth); c.start('https://'+host+'/Owner/Repo'); until(lambda:events)
+    assert events[0][2].token_rejected is True and events[0][2].rate_limit['authenticated'] is authenticated
+    assert auth.status().state=='NONE' and auth.rate is None
+
+@pytest.mark.parametrize('change',['save','clear','replace'])
+def test_controller_ignores_stale_rate(rig,change):
+    from covearchive.github.token import GitHubAuth
+    from test_github_token import TOKEN,OTHER
+    auth=GitHubAuth(None)
+    if change!='save': auth.save(TOKEN)
+    script=reply().replace("encode_error(r['request_id'],'not_found')",
+        "encode_error(r['request_id'],'not_found',rate_limit=dict(limit=5000,remaining=1,reset=9999999999,authenticated=False))").replace(
+        'sys.stdout.buffer.write(', 'import time;time.sleep(.2);sys.stdout.buffer.write(')
+    script=script.replace('authenticated=False',f'authenticated={change!="save"!r}')
+    c,events=rig(script,auth=auth); c.start(URL)
+    if change=='clear': auth.clear()
+    else: auth.save(OTHER)
+    until(lambda:events); assert events[0][2].rate_limit is not None and auth.rate is None
+
+def test_scan_anonymous_rate_after_midflight_rejection(rig):
+    from covearchive.github.token import GitHubAuth
+    token='ghp_'+'A'*36; auth=GitHubAuth(None); auth.save(token)
+    script=reply().replace("encode_error(r['request_id'],'not_found')",
+        "encode_error(r['request_id'],'unauthorized',token_rejected=True,rate_limit=dict(limit=60,remaining=59,reset=9999999999,authenticated=False))")
+    c,events=rig(script,auth=auth); c.start(URL); auth.reject(token); until(lambda:events)
+    assert auth.status().state=='REJECTED' and auth.rate is not None and auth.rate.authenticated is False

@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass, field, replace
 import os
+from covearchive.github.token import RateLimit, valid_token
+from covearchive.providers import parse_repository_url
 import signal
 from pathlib import Path
 import sys
@@ -10,7 +12,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
-from covearchive.scan_worker import MAX_RESPONSE_BYTES, ProtocolError, ScanFailure, decode_response, encode_request
+from covearchive.scan_worker import MAX_RESPONSE_BYTES, ProtocolError, ScanFailure, decode_response, encode_request_with_token
 
 DEFAULT_DEADLINE_MS = 180_000
 KILL_REAP_MS = 5_000
@@ -27,15 +29,17 @@ def worker_command(launcher):
     return [executable, "-I", "-B", str(Path(launcher).resolve()), "--scan-worker"]
 
 
-@dataclass
+@dataclass(repr=False)
 class Job:
     request_id: str
     process: QProcess
     deadline: QTimer
     reaper: QTimer
     started: float = field(default_factory=time.monotonic)
-    output: bytearray = field(default_factory=bytearray)
-    diagnostics: bytearray = field(default_factory=bytearray)
+    output: bytearray = field(default_factory=bytearray, repr=False)
+    diagnostics: bytearray = field(default_factory=bytearray, repr=False)
+    token_sent: str | None = field(default=None, repr=False)
+    is_github: bool = False
     reason: str | None = None
     failure: ScanFailure | None = None
 
@@ -45,16 +49,24 @@ class ScanController(QObject):
     terminal = Signal(str, str, object)
 
     def __init__(self, launcher=None, *, command_factory=worker_command,
-                 deadline_ms=DEFAULT_DEADLINE_MS, parent=None):
+                 deadline_ms=DEFAULT_DEADLINE_MS, parent=None, auth=None):
         super().__init__(parent)
         self.launcher, self.command_factory, self.deadline_ms = launcher, command_factory, deadline_ms
         self.job = None
+        self.auth = auth
 
     def start(self, url):
         if self.job is not None:
             return False
         request_id = uuid4().hex
-        request = encode_request(request_id, url)
+        token, is_github = None, False
+        try:
+            is_github = getattr(parse_repository_url(url), "provider", None) == "github"
+            if self.auth is not None and is_github:
+                candidate = self.auth.token()
+                if valid_token(candidate): token = candidate
+        except ValueError: pass
+        request = encode_request_with_token(request_id, url, token)
         process = QProcess(self)
         if sys.platform == "linux":
             # Qt's Unix CreateNewSession is the start_new_session equivalent.
@@ -69,7 +81,7 @@ class ScanController(QObject):
             modifier(no_window)
         command = self.command_factory(self.launcher)
         process.setProgram(command[0]); process.setArguments(command[1:])
-        job = Job(request_id, process, QTimer(self), QTimer(self))
+        job = Job(request_id, process, QTimer(self), QTimer(self), token_sent=token, is_github=is_github)
         self.job = job
         job.deadline.setSingleShot(True); job.reaper.setSingleShot(True)
         job.deadline.timeout.connect(lambda: self._deadline(job))
@@ -133,6 +145,9 @@ class ScanController(QObject):
     def cancel(self):
         if self.job is not None: self._stop(self.job, "CANCELLED")
 
+    def revoke_token(self):
+        if self.job is not None and self.job.token_sent: self.cancel()
+
     def _error(self, job, error):
         if self.job is not job: return
         if error == QProcess.FailedToStart:
@@ -150,7 +165,10 @@ class ScanController(QObject):
             try:
                 if job.process.exitStatus() != QProcess.NormalExit or job.process.exitCode() != 0:
                     result = ScanFailure(job.request_id, "process", message="Worker exited unexpectedly.")
-                else: result = decode_response(bytes(job.output), job.request_id)
+                else:
+                    output = bytes(job.output)
+                    if job.token_sent: output = output.replace(job.token_sent.encode('ascii'), b'[redacted]')
+                    result = decode_response(output, job.request_id)
                 state = "FAILED" if isinstance(result, ScanFailure) else "COMPLETED"
             except ProtocolError:
                 state, result = "FAILED", ScanFailure(job.request_id, "protocol", message="Invalid worker response.")
@@ -161,7 +179,22 @@ class ScanController(QObject):
             timer.stop(); timer.timeout.disconnect(); timer.deleteLater()
         job.process.deleteLater()
         if state == "FAILED" and isinstance(result, ScanFailure) and result.code in ("process", "protocol"):
-            result = replace(result, detail={"stderr": bytes(job.diagnostics[-2048:]).decode("utf-8", errors="replace")})
+            diagnostic = bytes(job.diagnostics).decode("utf-8", errors="replace")
+            if job.token_sent: diagnostic = diagnostic.replace(job.token_sent, "[redacted]")
+            result = replace(result, detail={"stderr": diagnostic[-2048:]})
+        if self.auth is not None and state in ("FAILED", "COMPLETED"):
+            try:
+                if job.token_sent and getattr(result,'token_rejected',False) is True: self.auth.reject(job.token_sent)
+            except Exception: pass
+            try:
+                rate = getattr(result,'rate_limit',None)
+                if job.is_github and rate is not None and (not rate['authenticated'] or job.token_sent is not None):
+                    self.auth.observe(RateLimit(rate['limit'],rate['remaining'],rate['reset'],rate['authenticated'],time.time()),
+                                      job.token_sent if rate['authenticated'] else None)
+            except Exception: pass
+        # A crash/deadline/protocol failure can lose a real rejection; keep the
+        # credential and let the next request establish its status again.
+        job.token_sent = None
         self.job = None
         self.terminal.emit(job.request_id, state, result)
 

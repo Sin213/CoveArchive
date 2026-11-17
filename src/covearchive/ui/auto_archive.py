@@ -89,7 +89,8 @@ class AutoArchive(QObject):
         if state!='COMPLETED':
             code='timeout' if state=='TIMED_OUT' else getattr(result,'code','internal_error')
             detail=getattr(result,'detail',None) or {}; hint=None
-            if state=='FAILED' and code=='incomplete_scan' and type(detail.get('cause_code')) is str and detail['cause_code']=='rate_limited': code='rate_limited'
+            if state=='FAILED' and code=='incomplete_scan' and type(detail.get('cause_code')) is str and detail['cause_code'] in ('rate_limited','unauthorized'): code=detail['cause_code']
+            if code=='unauthorized' and not getattr(result,'token_rejected',False): code='forbidden'
             for name in ('retry_after_seconds','retry_at','reset_at'):
                 value=detail.get(name)
                 if type(value) in (int,float): hint=value if name=='retry_after_seconds' else value-self.clock(); break

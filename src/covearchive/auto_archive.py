@@ -29,7 +29,7 @@ def failure_text(code, *, retry_at=None):
         'database_unavailable':'The archive queue database is unavailable; will retry automatically',
         'not_found':'Repository not found; check the URL or turn Auto-Archive off',
         'forbidden':'GitHub denied access; check repository access or turn Auto-Archive off',
-        'unauthorized':'GitHub requires authorization; check repository access or turn Auto-Archive off',
+        'unauthorized':'GitHub rejected the access token; replace or clear it in Settings, or turn Auto-Archive off',
         'needs_rules':NEEDS_RULES,'needs_root':NEEDS_ROOT,
     }.get(code,'Auto-Archive could not check this repository; try a scan on the Browse tab')
 

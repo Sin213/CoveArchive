@@ -230,6 +230,7 @@ def test_run_scan_dispatches_real_provider_factory(monkeypatch, provider):
     import covearchive.forgejo as forgejo
     target = RepositoryTarget("Owner", "Repo", provider, "github.com" if provider == "github" else "codeberg.org")
     class Client:
+        def __init__(self, **options): pass
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def discover_releases(self, actual):
@@ -280,3 +281,140 @@ def test_duplicate_wire_release_keys(provider):
     if provider=="gitlab":
         with pytest.raises(w.ProtocolError): w.decode_response(wire(obj),RID)
     else: assert w.decode_response(wire(obj),RID).catalog.releases==source.releases*2
+
+
+def test_token_request_wire_bounds():
+    token = 'ghp_'+'A'*36
+    data = w.encode_request_with_token(RID, URL, token)
+    assert w.parse_request(data) == (RID, URL)
+    assert w.parse_request_with_token(data) == (RID, URL, token)
+    assert 'github_token' not in json.loads(w.encode_request(RID, URL))
+    for bad in ('a'*19, 'a'*256, token+'\r\nX:y', None):
+        obj = json.loads(data); obj['github_token'] = bad
+        with pytest.raises(w.ProtocolError): w.parse_request_with_token(wire(obj))
+    with pytest.raises(w.ProtocolError): w.parse_request_with_token(data+b'x'*4096)
+
+
+@pytest.mark.parametrize('provider', ['github', 'codeberg', 'gitlab'])
+def test_token_ignored_for_injected_client(provider, capsys):
+    token = 'ghp_'+'A'*36
+    def broken(): raise RuntimeError('failure ' + token)
+    result = w.run_scan(RID, f'https://{dict(github="github.com",codeberg="codeberg.org",gitlab="gitlab.com")[provider]}/Owner/Repo',
+                        token=token, client_factory=broken)
+    assert token not in json.dumps(result) and token not in capsys.readouterr().err
+
+
+def test_worker_token_auth_rate(monkeypatch):
+    import covearchive.github.client as github
+    from covearchive.github.token import RateLimit
+    token = 'ghp_'+'A'*36
+    class Client:
+        def __init__(self, *, auth): self.auth = auth
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def discover_releases(self, target):
+            assert self.auth.token() == token
+            self.auth.observe(RateLimit(5000, 4999, 1234, True, 100),token)
+            return catalog()
+    monkeypatch.setattr(github, 'GitHubReleaseClient', Client)
+    result = w.run_scan(RID, URL, token=token)
+    assert token not in json.dumps(result)
+    decoded = w.decode_response(wire(result), RID)
+    assert decoded.rate_limit == dict(limit=5000, remaining=4999, reset=1234, authenticated=True)
+    assert w.decode_response(w.encode_success(RID, catalog()), RID).rate_limit is None
+    assert w.decode_response(w.encode_success(RID, catalog()), RID).token_rejected is False
+    for value in (None, True, -1, '5000'):
+        obj = dict(result); obj['rate_limit'] = dict(result['rate_limit'], limit=value)
+        with pytest.raises(w.ProtocolError): w.decode_response(wire(obj), RID)
+
+def test_main_token_diagnostics_and_stdout(monkeypatch, capsys):
+    token = 'ghp_'+'A'*36; output = io.BytesIO()
+    original = w.run_scan
+    def broken(): raise RuntimeError('failure '+token)
+    monkeypatch.setattr(w, 'run_scan', lambda rid,url,token=None: original(rid,url,token=token,client_factory=broken))
+    monkeypatch.setattr(w, 'start_watchdog', lambda *a: None)
+    assert w.main(stdin=io.BytesIO(w.encode_request_with_token(RID, URL, token)), stdout=output) == 0
+    assert token not in output.getvalue().decode() and token not in capsys.readouterr().err
+    assert w.decode_response(output.getvalue(), RID).code == 'internal_error'
+
+@pytest.mark.parametrize('bad', [True, 123, 'x'*256, 'x'*19, 'x'*20+'\r\nX:y'])
+def test_run_scan_invalid_token_is_bounded(bad):
+    assert w.run_scan(RID, URL, token=bad)['error']['code']=='bad_request'
+
+def test_worker_success_redacts_upstream_echoed_token():
+    token='ghp_'+'A'*36
+    source=catalog(release(name='Upstream echo '+token))
+    assert token.encode() in w.encode_success(RID,source)
+    class Client:
+        def __enter__(self): return self
+        def __exit__(self,*args): pass
+        def discover_releases(self,target): return source
+    result=w.run_scan(RID,URL,token=token,client_factory=Client)
+    assert result['status']=='ok' and token not in json.dumps(result)
+    decoded=w.decode_response(wire(result),RID)
+    assert decoded.catalog.releases[0].name=='Upstream echo [redacted]'
+
+@pytest.mark.parametrize('patch',[
+ {'authenticated':None},{'authenticated':0},{'authenticated':1},{'authenticated':'true'},
+ {'extra':1},{'limit':10**15},{'remaining':10**15},{'reset':10**15}])
+def test_rate_wire_rejects_invalid_provenance(patch):
+    obj=json.loads(w.encode_success(RID,catalog())); obj['rate_limit']=dict(limit=5000,remaining=1,reset=123,authenticated=True)
+    obj['rate_limit'].update(patch)
+    with pytest.raises(w.ProtocolError): w.decode_response(wire(obj),RID)
+
+def test_wire_provenance_on_errors_and_intrinsic_constraints():
+    rate=dict(limit=5000,remaining=1,reset=123,authenticated=False)
+    obj=json.loads(w.encode_error(RID,'unauthorized')); obj.update(rate_limit=dict(rate),token_rejected=True)
+    decoded=w.decode_response(wire(obj),RID)
+    assert decoded.rate_limit==rate and decoded.token_rejected is True
+    for value in (False,1,'true',None):
+        bad=dict(obj,token_rejected=value)
+        with pytest.raises(w.ProtocolError): w.decode_response(wire(bad),RID)
+    for code in ('not_found','internal_error'):
+        bad=json.loads(w.encode_error(RID,code)); bad['token_rejected']=True
+        assert w.decode_response(wire(bad),RID).token_rejected is True
+    ok=json.loads(w.encode_success(RID,catalog())); ok['token_rejected']=True
+    assert w.decode_response(wire(ok),RID).token_rejected is True
+    for provider in ('codeberg','gitlab'):
+        target=RepositoryTarget('Owner','Repo',provider,'codeberg.org' if provider=='codeberg' else 'gitlab.com',1 if provider=='gitlab' else None)
+        bad=json.loads(w.encode_success(RID,replace(catalog(),repository=target))); bad['rate_limit']=rate; bad['token_rejected']=True
+        with pytest.raises(w.ProtocolError): w.decode_response(wire(bad),RID)
+        del bad['rate_limit']
+        with pytest.raises(w.ProtocolError): w.decode_response(wire(bad),RID)
+    del obj['rate_limit']['authenticated']
+    with pytest.raises(w.ProtocolError): w.decode_response(wire(obj),RID)
+    duplicate=wire(dict(obj,rate_limit=rate)).replace(b'"token_rejected": true',b'"token_rejected":true,"token_rejected":true')
+    with pytest.raises(w.ProtocolError): w.decode_response(duplicate,RID)
+
+@pytest.mark.parametrize('kind',['large','incomplete','internal','encode'])
+def test_worker_preserves_rate_on_all_error_paths(monkeypatch,kind):
+    import covearchive.github.client as github
+    from covearchive.github.token import RateLimit
+    class Client:
+        def __init__(self,*,auth): self.auth=auth
+        def __enter__(self): return self
+        def __exit__(self,*args): pass
+        def discover_releases(self,target):
+            self.auth.reject(self.auth.token()); self.auth.observe(RateLimit(5000,4999,1234,False,100),None)
+            if kind=='internal': raise RuntimeError('upstream failure')
+            if kind=='encode': return None
+            return replace(catalog(),complete=False) if kind=='incomplete' else catalog(release(name='x'*2000))
+    monkeypatch.setattr(github,'GitHubReleaseClient',Client)
+    if kind=='large': monkeypatch.setattr(w,'MAX_RESPONSE_BYTES',400)
+    obj=w.run_scan(RID,URL,token='ghp_'+'A'*36)
+    assert obj['token_rejected'] is True
+    assert obj['status']=='error' and obj['rate_limit']['authenticated'] is False
+    assert obj['error']['code']==dict(large='result_too_large',incomplete='incomplete_scan',internal='internal_error',encode='internal_error')[kind]
+
+@pytest.mark.parametrize('probe,status',[(200,404),(401,200),(401,404)])
+def test_worker_private_repository_release_is_anonymous(monkeypatch,probe,status):
+    import covearchive.github.client as github
+    from test_github_client import real_transport
+    session,client,calls,_=real_transport([(probe,{},io.BytesIO(b'{"private":true}')),(status,{},None)],probe=False)
+    def factory(*,auth): client.auth=auth; return client
+    monkeypatch.setattr(github,'GitHubReleaseClient',factory)
+    token='ghp_'+'A'*36; result=w.run_scan(RID,URL,token=token)
+    assert (result['status']=='ok')==(status==200) and token not in json.dumps(result)
+    assert w.decode_response(wire(result),RID).token_rejected is (probe==401)
+    if status==404: assert result['error']['code']=='not_found'
+    assert len(calls)==2 and 'Authorization' in calls[0].headers and 'Authorization' not in calls[1].headers

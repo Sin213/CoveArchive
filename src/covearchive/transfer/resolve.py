@@ -20,7 +20,7 @@ from urllib.parse import urljoin, urlsplit
 import requests
 
 from covearchive import __version__
-from covearchive.github.client import API_VERSION, DirectSession, _json
+from covearchive.github.client import API_VERSION, DirectSession, _json, observe_rate, valid_token, is_public_repository
 from covearchive.github.models import Release, ReleaseAsset
 from covearchive.github.urls import RepositoryTarget
 from covearchive.providers import validate_repository
@@ -206,9 +206,41 @@ def _chunks(response, size, cancel, clock, deadline, *, exact=True):
     if exact and total != size: raise DownloadError("partial_transfer",retryable=True) from None
 
 
+def _public_probe(session, repository, auth, policy, cancel, clock, deadline, resolver):
+    token = auth.token()
+    if not valid_token(token): return None
+    probe = f"https://api.github.com/repos/{repository.owner}/{repository.repo}"
+    response, sent = None, None
+    def request_auth(request):
+        nonlocal sent
+        _anonymous(request)
+        if request.url == probe and auth.token() == token:
+            request.headers['Authorization'] = 'Bearer ' + token; sent = token
+        return request
+    try:
+        _check(cancel,clock,deadline)
+        validate_hop(probe,policy=policy,resolver=resolver,entry=True)
+        with _quiet_transport():
+            response = session.get(probe,headers={'Accept':'application/vnd.github+json','User-Agent':f'CoveArchive/{__version__}','X-GitHub-Api-Version':API_VERSION},auth=request_auth,
+                verify=True,proxies={},allow_redirects=False,stream=True,
+                timeout=tuple(min(v,deadline-clock()) for v in policy.timeout))
+        _check(cancel,clock,deadline); _peer(response,policy)
+        observe_rate(auth,response.headers,sent)
+        if response.status_code == 401 and sent is not None: auth.reject(sent)
+        if response.status_code == 200:
+            body = b''.join(_chunks(response,65535,cancel,clock,deadline,exact=False))
+            if sent == token and is_public_repository(_json(body)): return token
+    except DownloadError as exc:
+        if exc.code in ('cancelled','timeout'): raise
+    except Exception: pass
+    finally:
+        if response is not None: response.close()
+    return None
+
+
 @contextmanager
 def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=None,
-                      sleep=time.sleep, clock=time.monotonic, resolver=socket.getaddrinfo, release=None, provider=None):
+                      sleep=time.sleep, clock=time.monotonic, resolver=socket.getaddrinfo, release=None, provider=None, auth=None):
     """Yield checked chunks after headers; always close response and session.
 
     Injected sessions must be DirectSession and are consumed/closed by this call.
@@ -268,12 +300,26 @@ def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=No
             _check(cancel,clock,deadline)
             validate_hop(url,policy=policy,resolver=resolver,provider=provider,entry=hops==0)
             failure = None
+            sent_token = None
+            eligible = (provider == 'github' and not policy._test_origin and hops == 0 and url == entry
+                        and urlsplit(url).scheme == 'https' and urlsplit(url).netloc == 'api.github.com')
+            confirmed = _public_probe(session,repository,auth,policy,cancel,clock,deadline,resolver) if eligible and auth is not None else None
+            # Visibility can change between probe and entry (milliseconds); no state is kept.
+            def request_auth(request):
+                nonlocal sent_token
+                _anonymous(request)
+                if eligible and auth is not None and request.url == entry:
+                    candidate = auth.token()
+                    if valid_token(candidate) and candidate == confirmed:
+                        sent_token = candidate
+                        request.headers['Authorization'] = 'Bearer ' + candidate
+                return request
             try:
                 remaining = deadline-clock()
                 if remaining <= 0: raise DownloadError("timeout",retryable=True)
                 with _quiet_transport():
                     response = session.get(url,headers=headers.copy(),allow_redirects=False,stream=True,
-                        verify=True,proxies={},auth=_anonymous,timeout=tuple(min(v,remaining) for v in policy.timeout))
+                        verify=True,proxies={},auth=request_auth,timeout=tuple(min(v,remaining) for v in policy.timeout))
             except requests.exceptions.SSLError: failure = ("tls_error",False,False)
             except (requests.Timeout,requests.ConnectionError) as exc:
                 failure = ("timeout" if isinstance(exc,requests.Timeout) else "network",True,True)
@@ -284,6 +330,12 @@ def open_asset_stream(repository, asset, *, policy=None, session=None, cancel=No
                 _pause(2**retries,policy,cancel,sleep,clock,deadline); retries += 1; continue
             _check(cancel,clock,deadline); _peer(response,policy)
             status, values = response.status_code, response.headers
+            if eligible and auth is not None:
+                observe_rate(auth, values, sent_token)
+                if status == 401 and sent_token is not None:
+                    try: auth.reject(sent_token)
+                    except Exception: pass
+                    raise DownloadError('unauthorized') from None
             if (metadata or gitlab) and 300 <= status < 400: raise DownloadError("unsafe_redirect") from None
             if status in (301,302,303,307,308):
                 location = values.get("Location")

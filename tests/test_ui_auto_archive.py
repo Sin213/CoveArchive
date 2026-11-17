@@ -45,9 +45,9 @@ def env(tmp_path,monkeypatch):
 
 
 def due(e): e.clock[0]+=3600; e.auto.tick()
-def success(scan,c=None):
+def success(scan,c=None,*,rejected=False):
     c=c if c is not None else catalog(release(assets=[asset(size=1)]))
-    scan.finish(wire.decode_response(wire.encode_success(RID,c),RID))
+    scan.finish(wire.decode_response(wire.encode_success(RID,c,token_rejected=rejected),RID))
 def result(req,**kw):
     return EnqueueResult(req.token,kw.get('created',1),0,(),(),kw.get('started',False),kw.get('pending',0),kw.get('error'),kw.get('startup_error'))
 
@@ -66,10 +66,11 @@ def test_startup_restart_single_scan_and_manual_independence(env):
     finally: newer.shutdown(); manual.shutdown()
 
 
-def test_foreign_results_queued_delivery_and_notes(env):
+@pytest.mark.parametrize('rejected',[False,True])
+def test_foreign_results_queued_delivery_and_notes(env,rejected):
     e=env; changes=[]; e.auto.changed.connect(lambda:changes.append(1)); e.auto.start(); due(e)
     e.scan.terminal.emit('foreign','COMPLETED',None); assert not e.bridge.calls
-    success(e.scan); req=e.bridge.calls[-1]
+    success(e.scan,rejected=rejected); req=e.bridge.calls[-1]
     assert req.token<0 and req.requeue_completed is False
     e.bridge.enqueued.emit(replace(result(req),token=1)); APP.processEvents()
     assert e.auto.status('owner/repo').state=='checking'
@@ -542,3 +543,26 @@ def test_enqueue_rate_error_already_uses_bounded_global_policy(env):
     e.bridge.enqueued.emit(result(request,error='rate_limited')); APP.processEvents(); balanced(e.auto)
     assert e.auto.schedule.blocked_until==e.clock[0]+60
     assert 'GitHub rate limit reached' in e.auto.status('owner/repo').message
+
+
+
+@pytest.mark.parametrize('mode',['redirect','first','later'])
+def test_later_page_unauthorized_uses_authentication_guidance(env,mode):
+    from test_scan_process import later_401_script, command
+    from pathlib import Path
+    import subprocess,sys,json
+    token='ghp_'+'A'*36
+    request=wire.encode_request_with_token(RID,'https://github.com/Owner/Repo',token)
+    child=subprocess.run([sys.executable,'-I','-B','-c',later_401_script(mode)],input=request,capture_output=True,timeout=3)
+    assert child.returncode==0
+    failure=wire.decode_response(child.stdout,RID)
+    e=env; e.auto.start(); due(e); e.scan.finish(failure,'FAILED')
+    assert ('GitHub denied access' if mode=='redirect' else 'GitHub rejected the access token') in e.auto.status('owner/repo').message
+
+
+
+@pytest.mark.parametrize('code,flag,text',[('unauthorized',False,'GitHub denied access'),('not_found',True,'Repository not found')])
+def test_unproven_unauthorized_is_access_denied(env,code,flag,text):
+    e=env; e.auto.start(); due(e)
+    e.scan.finish(wire.ScanFailure(RID,code,token_rejected=flag),'FAILED')
+    assert text in e.auto.status('owner/repo').message

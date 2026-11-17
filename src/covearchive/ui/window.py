@@ -25,6 +25,8 @@ from covearchive.ui.library_panel import LibraryPanel
 from covearchive.queue.store import default_queue_path, QueueError
 from covearchive.ui.branding import app_icon
 from covearchive.ui.archive_bridge import ArchiveBridge, EnqueueRequest, EnqueueItem
+from covearchive.github.token import GitHubAuth
+from covearchive.ui.credential_vault import platform_vault
 from covearchive.github.select import select_releases
 from covearchive.github.urls import GitHubUrlError, ReleaseTagTarget, ReleaseListTarget, RepositoryTarget
 from covearchive.providers import parse_repository_url, canonical_url, display_name
@@ -190,17 +192,18 @@ class OptionalLabel(ElidedLabel):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, launcher=None, controller=None, *, bridge=None, preferences=None, library=None, auto_scan=None, auto_clock=time.time):
+    def __init__(self, launcher=None, controller=None, *, bridge=None, preferences=None, library=None, auto_scan=None, auto_clock=time.time, auth=None):
         super().__init__()
+        self.auth = auth if auth is not None else GitHubAuth(None)
         self.setWindowTitle("CoveArchive"); self.resize(1180,720); self.setMinimumSize(820,520)
         self.setWindowIcon(app_icon())
-        self.controller = controller if controller is not None else ScanController(launcher, parent=self)
+        self.controller = controller if controller is not None else ScanController(launcher, parent=self, auth=self.auth)
         self.catalog = None; self.show_catalog = False; self.active_id = None
         self.started = 0; self.checked=set(); self.eligible={}; self.rules=BuildRules(); self._rules_repo=None; self.enqueue_pending=False; self._scan_provider='github'
-        self.bridge=bridge if bridge is not None else ArchiveBridge(parent=self)
+        self.bridge=bridge if bridge is not None else ArchiveBridge(parent=self, runner_options={"auth":self.auth})
         self.preferences=preferences if preferences is not None else PreferenceStore()
         self.settings, self.preference_problem, _=self.preferences.load()
-        self.auto=AutoArchive(auto_scan if auto_scan is not None else ScanController(launcher,parent=self),self.bridge,
+        self.auto=AutoArchive(auto_scan if auto_scan is not None else ScanController(launcher,parent=self,auth=self.auth),self.bridge,
             lambda:self.library_panel.library,lambda:self.preferences.load()[0],clock=auto_clock,parent=self)
         self.enqueue_token=0; self.last_view=None; self._close_status=None; self._window_closed=False
         self.history_controller=HistoryController(self); self._history_closing=False; self._history_cancelling=False; self._history_pending=False
@@ -540,6 +543,8 @@ class MainWindow(QMainWindow):
             retry=detail.get("retry_after_seconds"); at=detail.get("retry_at")
             return "Rate limited"+(f": retry after {retry} seconds" if retry is not None else
                                     f": retry at {at}" if at is not None else "")
+        if (code == 'unauthorized' or code == 'incomplete_scan' and detail.get('cause_code') == 'unauthorized') and getattr(error,'token_rejected',False) is True and self.auth.status().state == 'REJECTED':
+            return 'GitHub rejected the access token. Open Settings to replace or clear it.'
         if code in ("forbidden","unauthorized"): return f"Access denied ({error.http_status})"
         if code == "not_found": return "Not found: repository not found or inaccessible"
         if code == "network": return "Network error: connection failed"
@@ -716,5 +721,6 @@ class MainWindow(QMainWindow):
 def main(argv=None, launcher=None):
     app=QApplication.instance() or QApplication(sys.argv if argv is None else argv)
     app.setWindowIcon(app_icon())
-    window=MainWindow(launcher); window.show()
+    auth=GitHubAuth(platform_vault()); auth.load()
+    window=MainWindow(launcher,auth=auth); window.show()
     return app.exec()

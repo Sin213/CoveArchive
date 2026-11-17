@@ -727,3 +727,117 @@ def test_gitlab_cache_separates_project_ids(tmp_path):
     assert summary.failed==1 and summary.completed==36
     assert store.get(bad.job_id).last_error_code=='repository_mismatch'
     assert calls==[(5,release.id),(6,release.id)] and archived==[6]*36
+
+
+@pytest.mark.parametrize('invalidate',[False,True])
+def test_queue_auth_default_catalog_archive_and_rejected_fallback(tmp_path,monkeypatch,invalidate):
+    import io
+    import json
+    import requests
+    from requests.adapters import HTTPAdapter
+    from requests.structures import CaseInsensitiveDict
+    from covearchive.github.token import GitHubAuth
+    from covearchive.transfer import resolve
+    from test_transfer_resolve import public_dns
+    from test_github_client import release as release_wire, asset as asset_wire
+    token='ghp_'+'A'*36; auth=GitHubAuth(None); auth.save(token)
+    root=tmp_path/'archive'; root.mkdir()
+    target,release,asset,_=item(); calls=[]; downloads=[]
+    class Raw(io.BytesIO):
+        def read(self,n,decode_content=False): return super().read(n)
+    class Adapter(HTTPAdapter):
+        def send(self,request,**kw):
+            calls.append(request); response=requests.Response(); response.request=request; response.url=request.url
+            response.headers=CaseInsensitiveDict()
+            if '/releases' not in request.url:
+                response.status_code=200; response._content_consumed=True; response._content=b'{"private":true}' if invalidate and downloads else b'{"private":false,"visibility":"public"}'; response.raw=Raw(response._content); return response
+            if '/releases/assets/' in request.url:
+                downloads.append(request); response.status_code=401 if not invalidate and len(downloads)==1 else 200
+                response.raw=Raw(b'x'*42)
+            else:
+                response.status_code=200; response._content_consumed=True
+                response._content=json.dumps([release_wire(10,assets=[asset_wire(1,size=42)])]).encode()
+            return response
+    original=g.DirectSession.__init__
+    def session_init(self): original(self); self.trust_env=False; self.mount('https://',Adapter())
+    monkeypatch.setattr(g.DirectSession,'__init__',session_init)
+    validate=resolve.validate_hop
+    monkeypatch.setattr(resolve,'validate_hop',lambda url,**kw:validate(url,**dict(kw,resolver=public_dns)))
+    store=QueueStore(tmp_path/'q.db'); first=store.enqueue(target,release,asset,str(root)).job
+    runner=QueueRunner(store,auth=auth); runner.run_pending()
+    assert store.get(first.job_id).state==(S.COMPLETED if invalidate else S.FAILED) and store.get(first.job_id).last_error_code==(None if invalidate else 'unauthorized')
+    assert auth.token()==(token if invalidate else None) and len(calls)==4
+    assert all(q.headers['Authorization']=='Bearer '+token for q in calls)
+    second_root=tmp_path/'second'; second_root.mkdir()
+    second=store.enqueue(target,release,asset,str(second_root)).job
+    runner.run_pending()
+    assert store.get(second.job_id).state==S.COMPLETED and len(store.list_jobs())==2
+    assert [bool(q.headers.get('Authorization')) for q in calls[4:]]==([True,False,True,False] if invalidate else [False,False])
+    assert list(second_root.rglob('app.zip')) and list(second_root.rglob('*.json'))
+    runner.shutdown()
+    for path in tmp_path.rglob('*'):
+        if path.is_file(): assert token.encode() not in path.read_bytes()
+    assert token not in repr(store.list_jobs()) and token not in repr(runner._cache)
+
+
+
+def test_metadata_401_does_not_poison_next_job_in_same_run(tmp_path):
+    from covearchive.github.token import GitHubAuth
+    auth=GitHubAuth(None); token='ghp_'+'A'*36; auth.save(token)
+    items=[item(1),item(2)]; release=replace(items[0][1],assets=tuple(i[2] for i in items))
+    store=QueueStore(tmp_path/'auth.db'); store.enqueue_many((p,release,a,root) for p,_,a,root in items)
+    calls=[]
+    def fetch(repo):
+        calls.append(auth.token())
+        if len(calls)==1:
+            auth.reject(auth.token()); raise g.AccessDeniedError(401,token_rejected=True)
+        return NS(releases=(release,))
+    with QueueRunner(store,auth=auth,catalog=fetch,archive=lambda *a,**kw:result()) as runner:
+        summary=runner.run_pending()
+    assert summary.failed==1 and summary.completed==1 and calls==[token,None]
+    jobs=store.list_jobs(); assert jobs[0].last_error_code=='unauthorized' and jobs[1].state==S.COMPLETED
+
+
+
+@pytest.mark.parametrize('redirected',[False,True])
+def test_catalog_401_outcome_uses_sent_token_provenance(redirected):
+    from covearchive.github.token import StaticAuth
+    from covearchive.queue.runner import _catalog_error
+    from test_github_client import real_transport,TARGET,ROOT
+    auth=StaticAuth('ghp_'+'A'*36)
+    script=([(302,{'Location':ROOT+'/repositories/1/releases'},None)] if redirected else [])+[(401,{},None)]
+    session,client,calls,_=real_transport(script); client.auth=auth
+    with session,pytest.raises(g.AccessDeniedError) as caught: client.discover_releases(TARGET)
+    assert _catalog_error(caught.value).code==('forbidden' if redirected else 'unauthorized')
+    assert caught.value.token_rejected is (not redirected) and auth.rejected is (not redirected)
+
+
+def test_private_queue_job_then_public_job(tmp_path,monkeypatch):
+    import io,json,requests
+    from covearchive.github.token import GitHubAuth
+    from covearchive.transfer import resolve
+    from test_transfer_resolve import CodebergAdapter,public_dns
+    from test_github_client import release as rw,asset as aw
+    auth=GitHubAuth(None); auth.save('ghp_'+'A'*36); calls=[]
+    class Adapter(CodebergAdapter):
+        def send(self,request,**kw):
+            private='/Owner/Repo' in request.url; probe='/releases' not in request.url; asset='/assets/' in request.url
+            body=(b'{"private":true}' if private else b'{"private":false,"visibility":"public"}') if probe else b'x'*42 if asset else json.dumps([rw(10,assets=[aw(1,size=42)])]).encode()
+            self.script=[(404 if private and asset else 200,{},body)]
+            response=super().send(request,**kw); calls.append(request); return response
+    original=g.DirectSession.__init__
+    def setup(self): original(self); self.mount('https://',Adapter([]))
+    monkeypatch.setattr(g.DirectSession,'__init__',setup)
+    def archive(repo,release,asset,root,**kw):
+        try:
+            with resolve.open_asset_stream(repo,asset,auth=auth,resolver=public_dns) as stream: assert b''.join(stream)==b'x'*42
+        except resolve.DownloadError as exc: return result('FAILED',exc.code)
+        return result()
+    repo,release,asset,root=item(); store=QueueStore(tmp_path/'private.db')
+    private,public=store.enqueue_many([(repo,release,asset,root),(replace(repo,repo='Public'),release,asset,root)])
+    with QueueRunner(store,auth=auth,settings=m.QueueSettings(max_active=1),archive=archive) as runner: summary=runner.run_pending()
+    assert summary.failed==1 and summary.completed==1 and store.get(private.job.job_id).last_error_code=='upstream_removed'
+    assert store.get(private.job.job_id).state==S.FAILED and store.get(public.job.job_id).state==S.COMPLETED
+    assert [q.url.split('api.github.com',1)[1] for q in calls]==[f'/repos/Owner/{repo}{suffix}' for repo in ('Repo','Public') for suffix in ('','/releases?per_page=100','','/releases/assets/1')]
+    assert [bool(q.headers.get('Authorization')) for q in calls[:4]]==[True,False,True,False]
+    assert [bool(q.headers.get('Authorization')) for q in calls[4:]]==[True]*4

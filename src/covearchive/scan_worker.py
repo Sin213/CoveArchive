@@ -7,6 +7,7 @@ import re
 import sys
 import threading
 
+from covearchive.github.token import StaticAuth, valid_token
 from covearchive.github.models import ReleaseCatalog, parse_release, release_key_ok
 from covearchive.github.urls import GitHubUrlError, RepositoryTarget, ReleaseTagTarget
 from covearchive.providers import parse_repository_url, validate_repository
@@ -31,6 +32,8 @@ class ProtocolError(ValueError):
 class ScanSuccess:
     request_id: str
     catalog: ReleaseCatalog
+    rate_limit: dict | None = None
+    token_rejected: bool = False
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,8 @@ class ScanFailure:
     http_status: int | None = None
     message: str = "Scan failed."
     detail: dict | None = None
+    rate_limit: dict | None = None
+    token_rejected: bool = False
 
 
 def _require(condition):
@@ -89,17 +94,30 @@ def _dump(obj):
 
 
 def encode_request(request_id, url):
-    data = _dump(dict(protocol=PROTOCOL_VERSION, request_id=request_id, action="scan", url=url))
-    parse_request(data)
+    return encode_request_with_token(request_id, url)
+
+
+def encode_request_with_token(request_id, url, token=None):
+    obj = dict(protocol=PROTOCOL_VERSION, request_id=request_id, action="scan", url=url)
+    if token is not None: obj["github_token"] = token
+    data = _dump(obj)
+    parse_request_with_token(data)
     return data
 
 
 def parse_request(line):
+    return parse_request_with_token(line)[:2]
+
+
+def parse_request_with_token(line):
     obj = _load(line, MAX_REQUEST_BYTES)
-    _keys(obj, ("protocol", "request_id", "action", "url"))
+    _require(type(obj) is dict)
+    _keys(obj, ("protocol", "request_id", "action", "url", "github_token") if "github_token" in obj
+          else ("protocol", "request_id", "action", "url"))
+    if "github_token" in obj: _require(valid_token(obj["github_token"]))
     _require(type(obj["protocol"]) is int and obj["protocol"] == PROTOCOL_VERSION and obj["action"] == "scan")
     _id(obj["request_id"]); _text(obj["url"], 2048)
-    return obj["request_id"], obj["url"]
+    return obj["request_id"], obj["url"], obj.get("github_token")
 
 
 def _release_wire(release, provider="github"):
@@ -109,22 +127,25 @@ def _release_wire(release, provider="github"):
     return obj
 
 
-def encode_success(request_id, catalog):
+def encode_success(request_id, catalog, rate_limit=None, *, token_rejected=False):
     if not catalog.complete:
         return encode_error(request_id, "incomplete_scan", detail=dict(pages_completed=catalog.pages,
-                            reason="incomplete", cause_code=None))
+                            reason="incomplete", cause_code=None), rate_limit=rate_limit, token_rejected=token_rejected)
     repository = validate_repository(catalog.repository)
-    data = _dump(dict(protocol=PROTOCOL_VERSION, request_id=request_id, status="ok", result=dict(
+    obj = dict(protocol=PROTOCOL_VERSION, request_id=request_id, status="ok", result=dict(
         owner=repository.owner, repo=repository.repo, provider=repository.provider, host=repository.host, project_id=repository.project_id, pages=catalog.pages,
         requests=catalog.requests, redirects=catalog.redirects,
         duplicate_release_ids=list(catalog.duplicate_release_ids),
-        releases=[_release_wire(release,repository.provider) for release in catalog.releases])))
+        releases=[_release_wire(release,repository.provider) for release in catalog.releases]))
+    if rate_limit is not None: obj["rate_limit"] = rate_limit
+    if token_rejected is True: obj['token_rejected'] = True
+    data = _dump(obj)
     if len(data) > MAX_RESPONSE_BYTES:
-        return encode_error(request_id, "result_too_large")
+        return encode_error(request_id, "result_too_large", rate_limit=rate_limit, token_rejected=token_rejected)
     return data
 
 
-def encode_error(request_id, exc_or_code, **fields):
+def encode_error(request_id, exc_or_code, *, rate_limit=None, token_rejected=False, **fields):
     code = exc_or_code if isinstance(exc_or_code, str) else getattr(exc_or_code, "code", "internal_error")
     if code not in ERROR_CODES:
         code = "internal_error"
@@ -136,9 +157,12 @@ def encode_error(request_id, exc_or_code, **fields):
         detail = dict(pages_completed=getattr(exc_or_code, "pages_completed", 0),
                       reason=getattr(exc_or_code, "reason", "incomplete")[:200],
                       cause_code=getattr(getattr(exc_or_code, "cause", None), "code", None))
-    return _dump(dict(protocol=PROTOCOL_VERSION, request_id=request_id, status="error", error=dict(
+    obj = dict(protocol=PROTOCOL_VERSION, request_id=request_id, status="error", error=dict(
         code=code, http_status=fields.get("http_status", getattr(exc_or_code, "status", None)),
-        message="Scan failed: " + code, detail=fields.get("detail", detail))))
+        message="Scan failed: " + code, detail=fields.get("detail", detail)))
+    if rate_limit is not None: obj['rate_limit'] = rate_limit
+    if token_rejected is True: obj['token_rejected'] = True
+    return _dump(obj)
 
 
 def _bounded(value):
@@ -157,7 +181,18 @@ def decode_response(data, expected_request_id):
         obj = _load(data, MAX_RESPONSE_BYTES)
         _require(type(obj) is dict and obj.get("status") in ("ok", "error"))
         body = "result" if obj["status"] == "ok" else "error"
-        _keys(obj, ("protocol", "request_id", "status", body))
+        keys = ("protocol", "request_id", "status", body)
+        rate = obj.get("rate_limit")
+        if "rate_limit" in obj:
+            keys += ("rate_limit",)
+            _keys(rate, ("limit", "remaining", "reset", "authenticated"))
+            for key in ("limit", "remaining", "reset"): _int(rate[key], 10**15-1)
+            _require(type(rate['authenticated']) is bool)
+        rejected = obj.get('token_rejected', False)
+        if 'token_rejected' in obj:
+            _require(rejected is True)
+            keys += ('token_rejected',)
+        _keys(obj, keys)
         _require(type(obj["protocol"]) is int and obj["protocol"] == PROTOCOL_VERSION)
         _id(obj["request_id"])
         _require(obj["request_id"] == expected_request_id)
@@ -179,11 +214,12 @@ def decode_response(data, expected_request_id):
             if code == "incomplete_scan":
                 _int(detail["pages_completed"]); _text(detail["reason"], 200)
                 _require(detail["cause_code"] is None or detail["cause_code"] in ERROR_CODES)
-            return ScanFailure(obj["request_id"], code, item["http_status"], item["message"], detail)
+            return ScanFailure(obj["request_id"], code, item["http_status"], item["message"], detail, rate, rejected)
         _keys(item, ("owner", "repo", "provider", "host", "project_id", "pages", "requests", "redirects", "duplicate_release_ids", "releases"))
         _text(item["owner"], 2048 if item["provider"]=="gitlab" else 40); _text(item["repo"], 255 if item["provider"]=="gitlab" else 100)
         _text(item["provider"], 16); _text(item["host"], 253)
         target = validate_repository(RepositoryTarget(item["owner"], item["repo"], item["provider"], item["host"], item["project_id"]))
+        _require((rate is None and not rejected) or target.provider=="github")
         _require(target.provider!="gitlab" or target.project_id is not None)
         for key in ("pages", "requests", "redirects"): _int(item[key])
         _require(type(item["duplicate_release_ids"]) is list and len(item["duplicate_release_ids"]) <= 10000)
@@ -203,39 +239,52 @@ def decode_response(data, expected_request_id):
         _require(target.provider!="gitlab" or len({r.id for r in releases})==len(releases))
         catalog = ReleaseCatalog(target, tuple(releases), item["pages"], item["requests"], item["redirects"],
                                  tuple(item["duplicate_release_ids"]), "", True)
-        return ScanSuccess(obj["request_id"], catalog)
+        return ScanSuccess(obj["request_id"], catalog, rate, rejected)
     except (ValueError, TypeError, KeyError, RecursionError, OverflowError) as exc:
         raise ProtocolError("Invalid response envelope.") from exc
 
 
-def run_scan(request_id, url, *, client_factory=None):
+def run_scan(request_id, url, *, client_factory=None, token=None):
     # Importing this module must remain possible without requests or Qt installed.
+    auth, catalog, error = None, None, None
     try:
-        target = parse_repository_url(url)
-        if isinstance(target, ReleaseTagTarget):
-            return json.loads(encode_error(request_id, "unsupported_target"))
-        if client_factory is None:
-            if target.provider == "gitlab":
-                from covearchive.gitlab import GitLabReleaseClient
-                client_factory = GitLabReleaseClient
-            elif target.provider == "codeberg":
-                from covearchive.forgejo import ForgejoReleaseClient
-                client_factory = ForgejoReleaseClient
+        if token is not None and not valid_token(token): error = "bad_request"
+        else:
+            target = parse_repository_url(url)
+            if isinstance(target, ReleaseTagTarget): error = "unsupported_target"
             else:
-                from covearchive.github.client import GitHubReleaseClient
-                client_factory = GitHubReleaseClient
-        with client_factory() as client:
-            data = encode_success(request_id, client.discover_releases(target))
-    except GitHubUrlError:
-        data = encode_error(request_id, "invalid_url")
+                if client_factory is None:
+                    if target.provider == "gitlab":
+                        from covearchive.gitlab import GitLabReleaseClient
+                        client_factory = GitLabReleaseClient
+                    elif target.provider == "codeberg":
+                        from covearchive.forgejo import ForgejoReleaseClient
+                        client_factory = ForgejoReleaseClient
+                    else:
+                        from covearchive.github.client import GitHubReleaseClient
+                        auth = StaticAuth(token)
+                        client_factory = lambda: GitHubReleaseClient(auth=auth)
+                with client_factory() as client: catalog = client.discover_releases(target)
+    except GitHubUrlError: error = "invalid_url"
     except Exception as exc:
-        data = encode_error(request_id, exc)
-        if json.loads(data)["error"]["code"] == "internal_error": _diagnostic(exc)
+        error = exc
+        if getattr(exc, 'code', 'internal_error') not in ERROR_CODES or getattr(exc, 'code', 'internal_error')=='internal_error': _diagnostic(exc, token)
+    rate = auth.rate if auth is not None else None
+    provenance = dict(rate_limit=dict(limit=rate.limit, remaining=rate.remaining, reset=rate.reset,
+                      authenticated=rate.authenticated) if rate else None, token_rejected=auth.rejected if auth else False)
+    try:
+        data = encode_error(request_id, error, **provenance) if error is not None else encode_success(request_id, catalog, **provenance)
+    except Exception as exc:
+        _diagnostic(exc, token)
+        data = encode_error(request_id, 'internal_error', **provenance)
+    if valid_token(token): data = data.replace(token.encode('ascii'), b'[redacted]')
     return json.loads(data)
 
 
-def _diagnostic(exc):
-    message = str(exc).replace("\r", "\\r").replace("\n", "\\n")[:300]
+def _diagnostic(exc, token=None):
+    message = str(exc)
+    if token: message = message.replace(token, "[redacted]")
+    message = message.replace("\r", "\\r").replace("\n", "\\n")[:300]
     if sys.stderr is not None:
         sys.stderr.write(f"{type(exc).__name__}: {message}\n"); sys.stderr.flush()
 
@@ -260,9 +309,9 @@ def main(stdin=None, stdout=None, *, deadline_seconds=DEFAULT_DEADLINE_SECONDS, 
     stdin = sys.stdin.buffer if stdin is None else stdin
     stdout = sys.stdout.buffer if stdout is None else stdout
     try:
-        request_id, url = parse_request(stdin.readline(MAX_REQUEST_BYTES + 1))
+        request_id, url, token = parse_request_with_token(stdin.readline(MAX_REQUEST_BYTES + 1))
         start_watchdog(stdin, deadline_seconds + 5, exit_fn)
-        stdout.write(_dump(run_scan(request_id, url))); stdout.flush()
+        stdout.write(_dump(run_scan(request_id, url, token=token))); stdout.flush()
         return 0
     except Exception as exc:
         _diagnostic(exc)

@@ -87,7 +87,7 @@ def test_polish_settings_content_and_safe_paths(ui):
     w.settings_button.click(); APP.processEvents(); d=w.settings_dialog
     labels=d.findChildren(QLabel)
     assert not any('&' in x.text() and x.buddy() is None for x in labels)
-    assert {x.text() for x in labels if x.property('inspectorHeading')}=={'APPEARANCE','ARCHIVE LOCATION','DATA LOCATIONS'}
+    assert {x.text() for x in labels if x.property('inspectorHeading')}=={'APPEARANCE','ARCHIVE LOCATION','GITHUB ACCESS','DATA LOCATIONS'}
     assert {'System follows your operating system until you choose Light or Dark.','The folder must already exist and be writable.','Read-only; shown for support.'}<={x.text() for x in labels if x.property('tone')=='muted'}
     for edit in (d.preferences_path,d.queue_path):
         assert edit.toolTip() and '<b>' not in edit.toolTip() and edit.accessibleName() and edit.cursorPosition()==0
@@ -142,3 +142,229 @@ def test_settings_root_validation_paths(ui,tmp_path,monkeypatch,case):
     else:
         assert d.isVisible() and d.feedback.text()=='Choose an existing folder that you can write to.' and d.feedback.property('tone')=='error' and d.root.hasFocus()
         assert w.root.text()==initial and w.settings==settings and w.preferences.path.read_bytes()==before
+
+
+def test_github_access_shape_save_clear_and_restart(ui,tmp_path):
+    from PySide6.QtWidgets import QLineEdit
+    from covearchive.github.token import GitHubAuth, RateLimit
+    from test_github_token import Vault, TOKEN, OTHER
+    w,_=ui; vault=Vault(); w.auth=GitHubAuth(vault)
+    w.settings_button.click(); APP.processEvents(); d=w.settings_dialog
+    assert d.github_token.echoMode()==QLineEdit.Password and d.github_token.accessibleName()=='GitHub access token'
+    assert not d.github_token.text() and not d.github_token.toolTip() and not d.github_token.accessibleDescription()
+    assert 'GITHUB ACCESS' in [x.text() for x in d.findChildren(QLabel)]
+    assert d.access_timer.isActive() and d.github_rate.text()=='GitHub API rate limit: not yet known. Appears after the next GitHub request.'
+    d.github_token.setText(TOKEN); d.save_token.click()
+    assert w.auth.token()==TOKEN and vault.value==TOKEN and not d.github_token.text()
+    assert 'Saved securely (Test vault)'==d.github_status.text()
+    d.github_token.setText(OTHER); d.github_token.setFocus(); QTest.keyClick(d.github_token,Qt.Key_Return); APP.processEvents()
+    assert d.isVisible() and w.auth.token()==OTHER and not d.github_token.text()
+    w.auth.reject(OTHER); d._refresh_access()
+    assert 'Authentication failed' in d.github_status.text()
+    from covearchive.scan_worker import ScanFailure
+    assert w._error_text(ScanFailure('a'*32,'unauthorized',token_rejected=True))=='GitHub rejected the access token. Open Settings to replace or clear it.'
+    import time
+    w.auth.observe(RateLimit(5000,4999,int(time.time())+3600,True,time.time()),w.auth.token()); d._refresh_access()
+    assert d.github_rate.text().startswith('GitHub API rate limit: 4999 of 5000 requests remaining') and 'authenticated' in d.github_rate.text()
+    w.auth.observe(RateLimit(None,0,int(time.time())+3600,False,time.time()),w.auth.token()); d._refresh_access()
+    assert d.github_rate.text().startswith('GitHub API rate limit: 0 requests remaining') and '(anonymous)' in d.github_rate.text()
+    w.auth.observe(RateLimit(None,0,1,False,time.time()),w.auth.token()); d._refresh_access(); assert d.github_rate.text()=='GitHub API rate limit: the window has reset; the next request shows the current value.'
+    d.clear_token.click(); assert w.auth.token() is None and vault.value is None and d.github_status.text()=='No token'
+    d.github_token.setText('invalid'); d.save_token.click()
+    assert '20-255' in d.feedback.text() and d.feedback.property('tone')=='error' and not d.github_token.text()
+    vault.fail=True; d.github_token.setText(TOKEN); d.save.click()
+    assert d.isVisible() and 'Session only (not saved)' in d.github_status.text() and not d.github_token.text()
+    assert w.preferences.save(w.settings) is None
+    assert TOKEN not in w.preferences.path.read_text()
+    d.reject(); assert not d.access_timer.isActive()
+    w.settings_button.click(); APP.processEvents(); assert not w.settings_dialog.github_token.text()
+    d=w.settings_dialog; d.clear_token.click(); assert w.auth.token() is None and 'Unlock' in d.github_status.text()
+    for path in tmp_path.rglob('*'):
+        if path.is_file(): assert TOKEN.encode() not in path.read_bytes() and OTHER.encode() not in path.read_bytes()
+
+
+def test_default_auth_is_session_only_and_wired(ui,monkeypatch):
+    import covearchive.ui.window as module
+    w,_=ui
+    assert w.auth.status().state=='NONE' and w.auth.status().label=='Session only'
+    assert w.auto.scan.auth is w.auth
+    monkeypatch.setattr(module,'platform_vault',lambda:pytest.fail('default constructor touched storage'))
+    from test_ui_window import FakeController, ROOT, until
+    other=module.MainWindow(ROOT/'run_covearchive.py',FakeController())
+    try:
+        assert other.auth.status().label=='Session only'
+        assert other.bridge._options['auth'] is other.auth
+    finally:
+        other.close(); until(lambda:other.bridge.closed)
+
+
+@pytest.mark.parametrize('key', [Qt.Key_Return,Qt.Key_Enter])
+@pytest.mark.parametrize('target', ['save_token','clear_token','github_token'])
+def test_github_access_focused_enter_uses_correct_action(ui,key,target):
+    from covearchive.github.token import GitHubAuth
+    from test_github_token import Vault, TOKEN, OTHER
+    w,_=ui; w.auth=GitHubAuth(Vault()); w.auth.save(TOKEN)
+    w.settings_button.click(); APP.processEvents(); d=w.settings_dialog
+    saves=[]; d.save.clicked.connect(lambda:saves.append(True))
+    d.github_token.setText(OTHER); widget=getattr(d,target)
+    d.activateWindow(); widget.setFocus(); APP.processEvents(); assert widget.hasFocus()
+    QTest.keyClick(widget,key); APP.processEvents()
+    assert d.isVisible() and not saves and not d.github_token.text()
+    assert w.auth.token()==(None if target=='clear_token' else OTHER)
+
+
+@pytest.mark.parametrize('button', ['save_token','save'])
+def test_github_access_trims_pasted_token(ui,button):
+    from covearchive.github.token import GitHubAuth, valid_token
+    from test_github_token import Vault, TOKEN
+    w,_=ui; vault=Vault(); w.auth=GitHubAuth(vault)
+    w.settings_button.click(); APP.processEvents(); d=w.settings_dialog
+    pasted=' '+TOKEN+'\n'; assert not valid_token(pasted)
+    d.github_token.setText(pasted); getattr(d,button).click(); APP.processEvents()
+    assert vault.value==TOKEN and w.auth.token()==TOKEN and not d.github_token.text()
+    assert d.isVisible()==(button=='save_token')
+
+
+def test_github_access_refresh_clears_stale_feedback(ui,monkeypatch):
+    from covearchive.github.token import GitHubAuth, VaultError
+    from test_github_token import Vault, TOKEN, OTHER
+    w,_=ui; vault=Vault(); w.auth=GitHubAuth(vault)
+    w.settings_button.click(); APP.processEvents(); d=w.settings_dialog
+    d.github_token.setText(TOKEN); d.save_token.click()
+    assert d.feedback.text()=='GitHub token saved.'
+    w.auth.reject(TOKEN); d._refresh_access()
+    assert not d.feedback.text() and 'Authentication failed' in d.github_status.text()
+    vault.fail=True; w.auth.save(OTHER); d._refresh_access()
+    d.feedback.setText('Stale storage feedback')
+    def broken(token): raise VaultError('Storage is now unavailable.')
+    monkeypatch.setattr(vault,'save',broken); w.auth.save(TOKEN); d._refresh_access()
+    assert not d.feedback.text() and 'Storage is now unavailable.' in d.github_status.text()
+
+
+
+def test_public_only_token_guidance(ui):
+    from pathlib import Path
+    w,_=ui; w.settings_button.click(); APP.processEvents()
+    assert 'Optional. Anonymous access works without a token. When creating one, choose read-only access to public repositories.' in [label.text() for label in w.settings_dialog.findChildren(QLabel)]
+    assert 'CoveArchive uses the token only for repositories GitHub reports public via one authenticated visibility check; otherwise release and asset requests stay anonymous.' in (Path(__file__).resolve().parents[1]/'README.md').read_text(encoding='utf-8')
+
+
+@pytest.mark.parametrize('action',['clear','replace','same'])
+def test_settings_revokes_both_active_token_scans(ui,action):
+    from types import SimpleNamespace as NS
+    from covearchive.github.token import GitHubAuth
+    from test_github_token import Vault,TOKEN,OTHER
+    w,_=ui; w.auth=GitHubAuth(Vault()); w.auth.save(TOKEN)
+    seen=[]
+    w.controller.revoke_token=lambda:seen.append('browse')
+    w.auto.scan.revoke_token=lambda:seen.append('auto')
+    w.settings_button.click(); APP.processEvents(); d=w.settings_dialog
+    if action=='clear': d.clear_token.click()
+    else: d.github_token.setText(OTHER if action=='replace' else TOKEN); d.save_token.click()
+    assert seen==([] if action=='same' else ['browse','auto'])
+
+
+def test_later_page_unauthorized_window_message(ui):
+    from covearchive.github.token import GitHubAuth
+    from covearchive.scan_worker import ScanFailure
+    w,_=ui; w.auth=GitHubAuth(None); token='ghp_'+'A'*36; w.auth.save(token); w.auth.reject(token)
+    failure=ScanFailure('a'*32,'incomplete_scan',detail={'cause_code':'unauthorized'},token_rejected=True)
+    assert w._error_text(failure)=='GitHub rejected the access token. Open Settings to replace or clear it.'
+
+
+from test_scan_process import rig as process_rig
+
+
+def test_settings_clear_cancels_and_reaps_both_workers(ui,process_rig):
+    from covearchive.github.token import GitHubAuth
+    from test_scan_process import command,reply,until,gone,URL
+    w,_=ui; auth=GitHubAuth(None); auth.save('ghp_'+'A'*36); w.auth=auth
+    browse,browse_events=process_rig(auth=auth); auto,auto_events=process_rig(auth=auth)
+    original=(w.controller,w.auto.scan)
+    try:
+        w.controller,w.auto.scan=browse,auto
+        for c in (browse,auto): c.start(URL)
+        until(lambda:all(c.job.process.processId()>0 for c in (browse,auto)))
+        pids=[c.job.process.processId() for c in (browse,auto)]
+        w.settings_button.click(); APP.processEvents(); w.settings_dialog.clear_token.click()
+        until(lambda:browse_events and auto_events)
+        assert browse_events[0][1]==auto_events[0][1]=='CANCELLED' and all(gone(pid) for pid in pids)
+        browse.command_factory=command(reply().replace('r=json.loads(sys.stdin.buffer.readline());',
+            "r=json.loads(sys.stdin.buffer.readline());assert 'github_token' not in r;"))
+        browse.start(URL); until(lambda:len(browse_events)==2)
+        assert browse_events[1][2].code=='not_found'
+    finally:
+        browse.shutdown(); auto.shutdown(); w.controller,w.auto.scan=original
+
+
+
+def test_token_link_rendered_contrast_tracks_reopened_theme(ui):
+    from collections import Counter
+    from PySide6.QtGui import QColor,QPalette,QImage,QPainter
+    from covearchive.ui.theme import TOKENS
+    from test_ui_theme import luminance
+    w,_=ui; previous=None
+    for theme in ('light','dark','light'):
+        w.set_appearance(theme); w.settings_button.click(); APP.processEvents(); d=w.settings_dialog
+        if previous is not None: assert d is previous
+        link=next(label for label in d.findChildren(QLabel) if 'Create a GitHub access token' in label.text())
+        source=link.grab().toImage()
+        image=QImage(source.size(),QImage.Format_ARGB32)
+        image.fill(d.grab().toImage().pixelColor(5,5))
+        painter=QPainter(image); painter.drawImage(0,0,source); painter.end()
+        colors=Counter(image.pixelColor(x,y).name() for x in range(image.width()) for y in range(image.height()))
+        background=QColor(colors.most_common(1)[0][0])
+        foreground=QColor(next(color for color,_ in colors.most_common() if color!=background.name()))
+        low,high=sorted((luminance(foreground),luminance(background)))
+        assert (high+.05)/(low+.05)>=4.5,(theme,foreground.name(),background.name())
+        assert foreground==QColor(TOKENS[theme]['accent'])
+        assert link.palette().color(QPalette.Link)==QColor(TOKENS[theme]['accent'])
+        assert link.openExternalLinks() and 'https://github.com/settings/personal-access-tokens/new' in link.text()
+        assert link.accessibleName()=='Create a GitHub access token'
+        assert link.textInteractionFlags() & Qt.LinksAccessibleByKeyboard
+        link.setFocus(); APP.processEvents(); assert link.hasFocus()
+        previous=d; d.reject(); APP.processEvents()
+
+
+def test_settings_section_notes_wrap_at_minimum_width(ui):
+    w,_=ui; w.settings_button.click(); APP.processEvents(); d=w.settings_dialog
+    text='Optional. Anonymous access works without a token. When creating one, choose read-only access to public repositories.'
+    note=next(label for label in d.findChildren(QLabel) if label.text()==text)
+    assert note.wordWrap() and d.minimumWidth()==520 and d.sizeHint().width()<800
+    d.resize(520,d.sizeHint().height()); APP.processEvents()
+    assert d.width()==520 and note.isVisible() and note.text()==text
+    assert note.height()>=note.heightForWidth(note.width())>note.fontMetrics().height()
+    assert d.rect().contains(note.mapTo(d,note.rect().bottomRight()))
+
+
+
+def test_unproven_unauthorized_never_claims_token_rejection(ui):
+    from covearchive.scan_worker import ScanFailure
+    from covearchive.github.token import GitHubAuth
+    w,_=ui; w.auth=GitHubAuth(None); token='ghp_'+'A'*36; w.auth.save(token); w.auth.reject(token)
+    assert 'rejected' not in w._error_text(ScanFailure('a'*32,'unauthorized',401))
+    assert w._error_text(ScanFailure('a'*32,'not_found',token_rejected=True))=='Not found: repository not found or inaccessible'
+
+
+@pytest.mark.parametrize('mode',['redirect','first','later'])
+def test_window_wording_uses_real_worker_rejection_provenance(ui,mode):
+    import subprocess,sys
+    from test_scan_process import later_401_script
+    from covearchive import scan_worker as wire
+    from covearchive.github.token import GitHubAuth
+    from test_github_token import Vault,TOKEN
+    w,_=ui; w.auth=GitHubAuth(Vault()); w.auth.save(TOKEN)
+    child=subprocess.run([sys.executable,'-I','-B','-c',later_401_script(mode)],input=wire.encode_request_with_token('a'*32,URL,TOKEN),capture_output=True,timeout=3)
+    assert child.returncode==0; failure=wire.decode_response(child.stdout,'a'*32)
+    if failure.token_rejected: w.auth.reject(TOKEN)
+    assert ('rejected' in w._error_text(failure))==(mode!='redirect')
+
+
+
+def test_clear_feedback_distinguishes_session_and_failed_vault(ui):
+    from covearchive.github.token import GitHubAuth
+    from test_github_token import Vault
+    w,_=ui; w.auth=GitHubAuth(None); w.settings_button.click(); APP.processEvents(); d=w.settings_dialog
+    d.clear_token.click(); assert d.feedback.text()=='GitHub token cleared from this session.'
+    vault=Vault(); vault.fail=True; w.auth=GitHubAuth(vault); w.auth.load()
+    d.clear_token.click(); assert 'cleared' not in d.feedback.text() and 'Any saved token was not removed' in d.feedback.text()

@@ -696,10 +696,14 @@ class RedirectRaw:
         pass
 
 
-def real_transport(script):
+def real_transport(script, probe=True):
     calls, sleeps = [], []
     class Adapter(HTTPAdapter):
         def send(self, request, **kwargs):
+            if probe and '/releases' not in request.url:
+                response=requests.Response(); response.status_code=200; response._content=b'{"private":false,"visibility":"public"}'
+                response._content_consumed=True; response.request=request; response.url=request.url
+                return response
             calls.append(request)
             status, headers, raw = script[len(calls) - 1] if len(calls) <= len(script) else (200, {}, None)
             response = requests.Response()
@@ -903,3 +907,215 @@ def test_library_duplicate_headers(name, values, cls, code):
             if cls is RateLimitError:
                 assert (exc.kind, exc.retry_after_seconds) == ("too_many_requests", 60)
     assert len(calls) == (2 if cls is None else 1) and sleeps == []
+
+
+def test_token_prepared_requests_and_rate():
+    from covearchive.github.token import StaticAuth
+    token = 'ghp_' + 'A'*36
+    auth = StaticAuth(token)
+    session, client, calls, sleeps = real_transport([(200, {
+        'X-RateLimit-Limit': '5000', 'X-RateLimit-Remaining': '4999', 'X-RateLimit-Reset': '1234'}, None)])
+    client.auth = auth
+    session.headers.update({'Cookie': 'bad', 'Proxy-Authorization': 'bad', 'Authorization': 'bad'})
+    with session: client.discover_releases(TARGET)
+    assert calls[0].headers['Authorization'] == 'Bearer ' + token
+    assert 'Cookie' not in calls[0].headers and 'Proxy-Authorization' not in calls[0].headers
+    assert auth.rate.limit == 5000 and auth.rate.authenticated
+    assert not sleeps
+
+@pytest.mark.parametrize('status', [401, 403, 429])
+def test_token_rejection_and_existing_cooldown(status):
+    from covearchive.github.token import StaticAuth
+    token = 'ghp_' + 'A'*36; auth = StaticAuth(token)
+    headers = {'Retry-After': '10'} if status != 401 else {}
+    session, client, calls, sleeps = real_transport([(status, headers, None)])
+    client.auth = auth
+    with session, pytest.raises(AccessDeniedError if status == 401 else RateLimitError):
+        client.discover_releases(TARGET)
+    assert len(calls) == 1 and not sleeps
+    assert (auth.token() is None) == (status == 401)
+
+@pytest.mark.parametrize('headers', [{}, {'X-RateLimit-Limit': '5000'},
+    {'X-RateLimit-Limit': 'bad', 'X-RateLimit-Remaining': '1', 'X-RateLimit-Reset': '123'}])
+def test_token_invalid_rate_headers_not_observed(headers):
+    from covearchive.github.token import StaticAuth
+    auth = StaticAuth('ghp_'+'A'*36)
+    session, client, _, _ = real_transport([(200, headers, None)]); client.auth = auth
+    with session: client._page(URL,dict(pages=0,requests=0,redirects=0,public_token=client.auth.token()))
+    assert auth.rate is None
+
+@pytest.mark.parametrize('host', ['api.github.com.evil', 'api.github.com:443', 'API.GITHUB.COM', 'github.com'])
+def test_token_send_time_host_guard(host):
+    from covearchive.github.token import StaticAuth
+    session, client, calls, _ = real_transport([(200, {}, None)])
+    client.auth = StaticAuth('ghp_'+'A'*36)
+    with session: client._page('https://' + host + PATH, dict(pages=0, requests=0, redirects=0, public_token=client.auth.token()))
+    assert 'Authorization' not in calls[0].headers
+
+@pytest.mark.parametrize('header,value', [('Link', link('https://evil.example'+PATH+'?page=2')),
+                                        ('Location', 'https://evil.example'+PATH)])
+def test_token_off_host_navigation_never_sent(header, value):
+    from covearchive.github.token import StaticAuth
+    session, client, calls, _ = real_transport([(200 if header=='Link' else 302, {header:value}, None)])
+    client.auth = StaticAuth('ghp_'+'A'*36)
+    with session, pytest.raises((PaginationError, UnsafeRedirectError)): client.discover_releases(TARGET)
+    assert len(calls) == 1 and calls[0].url.startswith(ROOT)
+
+@pytest.mark.parametrize('verify',[False,None,True])
+def test_token_requires_tls_verification(monkeypatch,verify):
+    from covearchive.github.token import StaticAuth
+    token='ghp_'+'A'*36
+    session,client,calls,_=real_transport([(200,{},None)]); client.auth=StaticAuth(token); session.verify=verify
+    adapter=session.get_adapter(URL); send=adapter.send; options=[]
+    def capture(request,**kwargs): options.append(kwargs['verify']); return send(request,**kwargs)
+    monkeypatch.setattr(adapter,'send',capture)
+    with session: client._page(URL,dict(pages=0,requests=0,redirects=0,public_token=client.auth.token()))
+    assert options==[verify]
+    assert calls[0].headers.get('Authorization')==('Bearer '+token if verify is True else None)
+
+@pytest.mark.parametrize('status',[301,302,307,308])
+def test_token_redirect_hops_are_anonymous_and_observed(status):
+    from covearchive.github.token import StaticAuth
+    class Auth(StaticAuth):
+        def __init__(self,token): super().__init__(token); self.observations=[]
+        def observe(self,rate,token): self.observations.append(rate); super().observe(rate,token)
+    token='ghp_'+'A'*36; auth=Auth(token)
+    rate={'X-RateLimit-Limit':'5000','X-RateLimit-Remaining':'4999','X-RateLimit-Reset':'1234'}
+    session,client,calls,_=real_transport([(status,dict(rate,Location=ROOT+'/repositories/1/releases'),None),(200,rate,None)])
+    client.auth=auth; session.headers.update({'Cookie':'bad','Proxy-Authorization':'bad'})
+    with session: result=client.discover_releases(TARGET)
+    assert result.complete and result.pages==1 and result.redirects==1
+    assert calls[0].headers['Authorization']=='Bearer '+token
+    assert 'Authorization' not in calls[1].headers
+    assert all('Cookie' not in q.headers and 'Proxy-Authorization' not in q.headers for q in calls)
+    assert [rate.authenticated for rate in auth.observations]==[True,False]
+
+def test_token_redirect_chain_then_pagination_reauthenticates():
+    from covearchive.github.token import StaticAuth
+    token='ghp_'+'A'*36
+    session,client,calls,_=real_transport([(301,{'Location':ROOT+'/repos/New/Repo/releases'},None),
+        (302,{'Location':ROOT+'/repositories/1/releases'},None),
+        (200,{'Link':link(page(2,path='/repositories/1/releases'))},None),(200,{},None)])
+    client.auth=StaticAuth(token)
+    with session: result=client.discover_releases(TARGET)
+    assert result.complete and result.pages==2 and result.redirects==2
+    assert [q.headers.get('Authorization') for q in calls]==['Bearer '+token,None,None,'Bearer '+token]
+    assert calls[-1].url==page(2,path='/repositories/1/releases')
+
+@pytest.mark.parametrize('failure',[503,'timeout','connection'])
+@pytest.mark.parametrize('redirected',[False,True])
+def test_token_retry_keeps_current_url_auth_policy(monkeypatch,failure,redirected):
+    from covearchive.github.token import StaticAuth
+    token='ghp_'+'A'*36
+    session,client,_,sleeps=real_transport([(200,{},None)]); client.auth=StaticAuth(token)
+    adapter=session.get_adapter(URL); send=adapter.send; captured=[]
+    def respond(request,status,headers):
+        response=requests.Response(); response.status_code=status; response.headers=CaseInsensitiveDict(headers)
+        response.request=request; response.url=request.url; response._content=b'[]'; response._content_consumed=True
+        return response
+    def flaky(request,**kwargs):
+        captured.append(request); index=len(captured)-1
+        if redirected and index==0: return respond(request,302,{'Location':ROOT+'/repositories/1/releases'})
+        if index==int(redirected):
+            if failure==503: return respond(request,503,{})
+            raise requests.Timeout() if failure=='timeout' else requests.ConnectionError()
+        return send(request,**kwargs)
+    monkeypatch.setattr(adapter,'send',flaky)
+    with session: client._page(URL,dict(pages=0,requests=0,redirects=0,public_token=client.auth.token()))
+    assert len(sleeps)==1 and captured[-1].url==captured[-2].url
+    expected=['Bearer '+token,None,None] if redirected else ['Bearer '+token,'Bearer '+token]
+    assert [q.headers.get('Authorization') for q in captured]==expected
+
+@pytest.mark.parametrize('status',[301,302,307,308])
+def test_anonymous_redirect_401_does_not_reject_token(status):
+    from covearchive.github.token import StaticAuth
+    token='ghp_'+'A'*36; auth=StaticAuth(token)
+    session,client,calls,sleeps=real_transport([(status,{'Location':ROOT+'/repositories/1/releases'},None),(401,{},None)])
+    client.auth=auth
+    with session,pytest.raises(AccessDeniedError) as exc: client.discover_releases(TARGET)
+    assert exc.value.code=='unauthorized' and len(calls)==2 and not sleeps
+    assert auth.token()==token and 'Authorization' not in calls[1].headers
+
+def test_token_303_is_not_followed():
+    from covearchive.github.token import StaticAuth
+    session,client,calls,_=real_transport([(303,{'Location':ROOT+'/repositories/1/releases'},None)])
+    client.auth=StaticAuth('ghp_'+'A'*36)
+    with session,pytest.raises(UnexpectedStatusError): client.discover_releases(TARGET)
+    assert len(calls)==1
+
+@pytest.mark.parametrize('initial,change',[(True,'clear'),(True,'replace'),(False,'save')])
+def test_inflight_client_drops_previous_credential_rate(monkeypatch,initial,change):
+    from covearchive.github.token import GitHubAuth
+    auth=GitHubAuth(None)
+    if initial: auth.save('ghp_'+'A'*36)
+    headers={'X-RateLimit-Limit':'5000','X-RateLimit-Remaining':'1','X-RateLimit-Reset':'1234'}
+    session,client,calls,_=real_transport([(200,headers,None)]); client.auth=auth
+    adapter=session.get_adapter(URL); send=adapter.send
+    def finish(request,**kw):
+        if change=='clear': auth.clear()
+        else: auth.save('ghp_'+'B'*36)
+        return send(request,**kw)
+    monkeypatch.setattr(adapter,'send',finish)
+    with session: client._page(URL,dict(pages=0,requests=0,redirects=0,public_token=client.auth.token()))
+    assert auth.rate is None
+
+@pytest.mark.parametrize('body',[b'{"private":true}',b'{}',b'{"private":"false"}',b'{"private":false,"visibility":"private"}',b'bad',b'{"private":false}',b'{"private":false,"visibility":"PUBLIC"}',b'{"private":false,"visibility":"internal"}',b'{"private":false,"visibility":null}',b'{"private":false,"visibility":"public"}'])
+def test_visibility_probe_gates_release_token(body):
+    from covearchive.github.token import StaticAuth
+    from io import BytesIO
+    auth=StaticAuth('ghp_'+'A'*36)
+    session,client,calls,_=real_transport([(200,{},BytesIO(body)),(404,{},None)],probe=False)
+    client.auth=auth
+    with session,pytest.raises(NotFoundError): discover(client)
+    assert calls[0].url==ROOT+'/repos/Owner/Repo' and 'Authorization' in calls[0].headers
+    assert ('Authorization' in calls[1].headers)==(body==b'{"private":false,"visibility":"public"}')
+
+@pytest.mark.parametrize('status',[401,403,404,429,500,301])
+def test_unknown_visibility_falls_back_anonymously(status):
+    from covearchive.github.token import StaticAuth
+    auth=StaticAuth('ghp_'+'A'*36)
+    first=(status,{'Location':'https://evil.example/x'} if status==301 else {},None)
+    session,client,calls,_=real_transport([first]*(3 if status==500 else 1)+[(404,{},None)],probe=False); client.auth=auth
+    with session,pytest.raises(NotFoundError): discover(client)
+    assert all('Authorization' in q.headers for q in calls[:-1]) and 'Authorization' not in calls[-1].headers
+    assert auth.rejected is (status==401)
+
+def test_public_probe_once_for_paginated_scan():
+    from covearchive.github.token import StaticAuth
+    from io import BytesIO
+    session,client,calls,_=real_transport([(200,{},BytesIO(b'{"private":false,"visibility":"public"}')),(200,{'Link':link(page(2))},None),(200,{},None)],probe=False)
+    client.auth=StaticAuth('ghp_'+'A'*36)
+    with session: assert discover(client).pages==2
+    assert len(calls)==3 and all('Authorization' in q.headers for q in calls)
+
+
+@pytest.mark.parametrize('failure',[requests.Timeout,requests.ConnectionError])
+def test_visibility_transport_failure_stays_anonymous(monkeypatch,failure):
+    from covearchive.github.token import StaticAuth
+    session,client,calls,_=real_transport([(404,{},None)],probe=False); client.auth=StaticAuth('ghp_'+'A'*36)
+    adapter=session.get_adapter(URL); send=adapter.send
+    def fail_probe(request,**kw):
+        if '/releases' not in request.url: raise failure()
+        return send(request,**kw)
+    monkeypatch.setattr(adapter,'send',fail_probe)
+    with session,pytest.raises(NotFoundError): discover(client)
+    assert len(calls)==1 and 'Authorization' not in calls[0].headers
+
+
+@pytest.mark.parametrize('verified',[False,True])
+def test_raw_page_state_requires_explicit_public_token(verified):
+    from covearchive.github.token import StaticAuth
+    session,client,calls,_=real_transport([(200,{},None)]); token='ghp_'+'A'*36; client.auth=StaticAuth(token)
+    state=dict(pages=0,requests=0,redirects=0)
+    if verified: state['public_token']=token
+    with session: client._page(URL,state)
+    assert ('Authorization' in calls[0].headers)==verified
+
+
+def test_probe_rejection_keeps_following_release_anonymous():
+    from covearchive.github.token import GitHubAuth
+    auth=GitHubAuth(None); auth.save('ghp_'+'A'*36)
+    session,client,calls,_=real_transport([(401,{},None),(200,{},None)],probe=False); client.auth=auth
+    with session: assert discover(client).complete
+    assert auth.status().state=='REJECTED'
+    assert [bool(q.headers.get('Authorization')) for q in calls]==[True,False]

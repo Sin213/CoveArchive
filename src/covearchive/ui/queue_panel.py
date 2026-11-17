@@ -22,6 +22,7 @@ def size_text(size):
 
 
 _ERRORS = {
+    "unauthorized":"GitHub rejected the access token; replace or clear it in Settings",
     "database_busy":"Queue database is busy", "database_unavailable":"Queue database is unavailable",
     "rate_limited":"GitHub rate limited", "server_error":"Server unavailable",
     "network":"Network connection failed", "timeout":"Request timed out",

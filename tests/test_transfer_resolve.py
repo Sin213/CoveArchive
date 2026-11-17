@@ -368,3 +368,83 @@ def test_codeberg_metadata_redirect_never_requests_target(path):
     with pytest.raises(r.DownloadError) as caught:
         with r.open_asset_stream(CB,asset(),release=CB_RELEASE,session=session,resolver=public_dns): pytest.fail('entered')
     assert caught.value.code=='unsafe_redirect' and [q.url for q,k in adapter.calls]==['https://codeberg.org/api/v1/repos/Owner/Repo/releases/10/assets/7']
+
+
+@pytest.mark.parametrize('public_again',[True,False])
+@pytest.mark.parametrize('status', [200, 401, 403])
+def test_github_token_entry_refresh_and_rejection(status,public_again):
+    from covearchive.github.token import GitHubAuth
+    token = 'ghp_'+'A'*36; auth = GitHubAuth(None); auth.save(token)
+    entry_headers = {'X-RateLimit-Limit':'5000','X-RateLimit-Remaining':'4999','X-RateLimit-Reset':'9999999999'}
+    script = ([(401,entry_headers,b'')] if status == 401 else [
+        (302,dict(entry_headers,Location='https://objects.githubusercontent.com/old'),b''),
+        (status,{},BODY)] + ([(302,{'Location':'https://objects.githubusercontent.com/new'},b''),(200,{},BODY)] if status==403 else []))
+    probe=(200,{},b'{"private":false,"visibility":"public"}')
+    script=[probe]+script[:2]+([(200,{},probe[2] if public_again else b'{"private":true}')]+script[2:] if status==403 else script[2:])
+    session=DirectSession(); adapter=CodebergAdapter(script); session.mount('https://',adapter)
+    if status==401:
+        with pytest.raises(r.DownloadError) as exc:
+            with r.open_asset_stream(TARGET,asset(),session=session,resolver=public_dns,auth=auth): pass
+        assert exc.value.code=='unauthorized' and not exc.value.retryable and auth.token() is None
+        assert token not in str(exc.value) and token not in repr(exc.value)
+    else:
+        with r.open_asset_stream(TARGET,asset(),session=session,resolver=public_dns,auth=auth) as stream:
+            assert b''.join(stream)==BODY
+    for index,(request,_) in enumerate(adapter.calls):
+        assert request.headers.get('Authorization') == ('Bearer '+token if index%3!=2 and (index!=4 or public_again) else None)
+        assert 'Cookie' not in request.headers and 'Proxy-Authorization' not in request.headers
+    if status==401: assert auth.rate is None
+    else: assert auth.rate.limit==5000 and auth.rate.authenticated
+
+
+def test_loopback_never_gets_token(server):
+    from covearchive.github.token import StaticAuth
+    assert consume(server,auth=StaticAuth('ghp_'+'A'*36))==BODY
+    assert len(server.requests)==2 and all('Authorization' not in headers for _,headers in server.requests)
+
+
+def test_other_providers_never_get_github_token():
+    from covearchive.github.token import StaticAuth
+    auth=StaticAuth('ghp_'+'A'*36)
+    data,adapter=cb_stream([cb_meta(),(200,{},BODY)],auth=auth)
+    assert data==BODY and all('Authorization' not in q.headers for q,_ in adapter.calls)
+    from test_gitlab_transfer import setup, consume as gitlab_consume
+    session,adapter=setup([(200,{},BODY)])
+    assert gitlab_consume(session,auth=auth)==BODY
+    assert all('Authorization' not in q.headers for q,_ in adapter.calls)
+
+
+@pytest.mark.parametrize('case',['public','private','missing','internal','upper','string','404','403','429','500','bad','301','oversize','timeout','connection','401','clear','replace','cancel','retry'])
+def test_asset_visibility_is_probed_per_request(monkeypatch,case):
+    from covearchive.github.token import GitHubAuth
+    from test_github_token import TOKEN,OTHER
+    auth=GitHubAuth(None); auth.save(TOKEN); cancelled=[False]
+    public=b'{"private":false,"visibility":"public"}'
+    body=dict(private=b'{"private":true}',missing=b'{"private":false}',internal=b'{"private":false,"visibility":"internal"}',upper=b'{"private":false,"visibility":"PUBLIC"}',string=b'{"private":"false","visibility":"public"}',bad=b'bad',oversize=public+b' '*(65537-len(public))).get(case,public)
+    status=int(case) if case.isdigit() else 200
+    session=DirectSession(); adapter=CodebergAdapter([(status,{'Location':'https://evil.invalid/'},body),(200,{},BODY)]); session.mount('https://',adapter)
+    if case=='retry': adapter.script=[adapter.script[0],(503,{},b''),adapter.script[0],(200,{},BODY)]
+    send=adapter.send
+    def probe(request,**kw):
+        if request.url=='https://api.github.com/repos/Owner/Repo':
+            if case in ('timeout','connection'):
+                adapter.calls.append((request,kw)); adapter.script.pop(0)
+                raise requests.Timeout() if case=='timeout' else requests.ConnectionError()
+            response=send(request,**kw)
+            if case=='clear': auth.clear()
+            if case=='replace': auth.save(OTHER)
+            if case=='cancel': cancelled[0]=True
+            return response
+        return send(request,**kw)
+    monkeypatch.setattr(adapter,'send',probe)
+    if case=='cancel':
+        with pytest.raises(r.DownloadError) as caught:
+            with r.open_asset_stream(TARGET,asset(),session=session,resolver=public_dns,auth=auth,cancel=lambda:cancelled[0]): pass
+        assert caught.value.code=='cancelled' and len(adapter.calls)==1
+        return
+    with r.open_asset_stream(TARGET,asset(),session=session,resolver=public_dns,auth=auth,sleep=lambda _:None) as stream: assert b''.join(stream)==BODY
+    assert [q.url for q,_ in adapter.calls]==['https://api.github.com/repos/Owner/Repo','https://api.github.com/repos/Owner/Repo/releases/assets/7']*(2 if case=='retry' else 1)
+    assert [bool(q.headers.get('Authorization')) for q,_ in adapter.calls]==[True,case in ('public','retry')]*(2 if case=='retry' else 1)
+    assert adapter.calls[0][0].headers['User-Agent'].startswith('CoveArchive/') and adapter.calls[0][0].headers['X-GitHub-Api-Version']==r.API_VERSION
+    assert all(k['verify'] is True and k['proxies']=={} and k['stream'] is True for _,k in adapter.calls)
+    if case=='401': assert auth.status().state=='REJECTED' and auth.token() is None
