@@ -73,8 +73,7 @@ class LibraryPanel(W.QWidget):
         self.mutating = []
         def button(text, callback, row, mutate=True):
             value = W.QPushButton(text); value.clicked.connect(callback)
-            if isinstance(row,W.QGridLayout): row.addWidget(value,row.count()//2,row.count()%2)
-            else: row.addWidget(value)
+            value.setSizePolicy(W.QSizePolicy.Maximum,W.QSizePolicy.Fixed); row.addWidget(value)
             if mutate: self.mutating.append(value)
             return value
         self.add = button("Add", self._add, top)
@@ -86,21 +85,22 @@ class LibraryPanel(W.QWidget):
         body = W.QHBoxLayout(); layout.addLayout(body, 1)
         # Leave room for the identifying columns with wider native delegates.
         left_card,right_card=W.QFrame(),W.QFrame()
-        for card in (left_card,right_card): card.setProperty("section","card")
         body.addWidget(left_card,2); body.addWidget(right_card,8)
         left, right = W.QVBoxLayout(left_card), W.QVBoxLayout(right_card)
         for pane,heading in ((left,"Collections"),(right,"Repositories")):
             pane.setContentsMargins(2,4,2,4); pane.setSpacing(4)
-            label=W.QLabel(heading); label.setTextFormat(Qt.PlainText); label.setProperty("heading",True); pane.addWidget(label)
+            label=W.QLabel(heading.upper()); label.setTextFormat(Qt.PlainText); label.setProperty("heading",True); label.setProperty('inspectorHeading',True); pane.addWidget(label)
         self.tree = W.QTreeWidget(); self.tree.setHeaderHidden(True); self.tree.setMinimumHeight(140); left.addWidget(self.tree)
         folders = W.QHBoxLayout(); left.addLayout(folders)
         self.new = button("New", self._new, folders); self.rename_collection = button("Rename", self._rename_collection, folders)
         self.delete = button("Delete", self._delete, folders)
+        folders.addStretch()
         self.table = W.QTableView(); self.table.setObjectName("repositoryTable"); self.table.setMinimumHeight(140); self.table.setTextElideMode(Qt.ElideRight); self.model = RepositoryModel(self); self.model.rows = (); self.model.labels = []
         self.table.setModel(self.model); self.table.setSelectionBehavior(W.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(W.QAbstractItemView.ExtendedSelection); self.table.verticalHeader().hide()
-        self.table.verticalHeader().setSectionResizeMode(W.QHeaderView.Fixed); self.table.verticalHeader().setDefaultSectionSize(26)
+        self.table.verticalHeader().setSectionResizeMode(W.QHeaderView.Fixed); self.table.verticalHeader().setDefaultSectionSize(self.table.fontMetrics().height()+12)
         self.table.horizontalHeader().setSectionResizeMode(W.QHeaderView.Stretch); right.addWidget(self.table)
+        self.table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft|Qt.AlignVCenter)
         self.table.installEventFilter(self); self._column_floor()
         # Size status columns from visible rows; scanning Qt's default 1000 rows
         # on every layout/scrollbar change stalls the GUI after a large import.
@@ -110,11 +110,12 @@ class LibraryPanel(W.QWidget):
         self.empty=W.QLabel(); self.empty.setTextFormat(Qt.PlainText); self.empty.setWordWrap(True)
         self.empty.setAlignment(Qt.AlignCenter); self.empty.setAttribute(Qt.WA_TransparentForMouseEvents)
         set_tone(self.empty,"muted"); overlay.addWidget(self.empty)
-        # Two rows keep all actions readable beside the Collections pane.
-        actions = W.QGridLayout(); actions.setSpacing(4); right.addLayout(actions)
+        actions = W.QHBoxLayout(); actions.setSpacing(4); right.addLayout(actions)
         self.move = button("Move to...", self._move, actions); self.rename = button("Rename...", self._rename, actions)
+        actions.addStretch(); actions=W.QHBoxLayout(); actions.setSpacing(4); right.addLayout(actions)
         self.remove = button("Remove from list...", self._remove, actions)
         self.auto_button=button('Auto-Archive...',self._auto_archive,actions)
+        actions.addStretch()
         for value in (self.delete, self.remove): set_role(value, 'danger')
         auto_frame=W.QFrame(); auto_frame.setFrameShape(W.QFrame.StyledPanel); auto_frame.setProperty("section","card"); layout.addWidget(auto_frame)
         auto_layout=W.QVBoxLayout(auto_frame); auto_layout.setContentsMargins(7,4,7,4); auto_layout.setSpacing(0)
@@ -147,7 +148,8 @@ class LibraryPanel(W.QWidget):
         self.table.horizontalHeader().setMinimumSectionSize(max(84, width + int(self.table.showGrid())))
 
     def eventFilter(self, watched, event):
-        if watched is self.table and event.type() == QEvent.FontChange: self._column_floor()
+        if watched is self.table and event.type() == QEvent.FontChange:
+            self._column_floor(); self.table.verticalHeader().setDefaultSectionSize(self.table.fontMetrics().height()+12)
         return super().eventFilter(watched, event)
 
     def changeEvent(self,event):

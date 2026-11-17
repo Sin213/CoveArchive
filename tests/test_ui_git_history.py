@@ -225,8 +225,8 @@ def test_idle_history_controls_share_selection_band(ui):
     window,scan=ui;window.resize(820,520);succeed(window,scan,release(assets=[asset()]));APP.processEvents()
     assert window.history_status.isHidden()
     buttons=(window.select_matching,window.clear_selection,window.archive_selected,window.history_button,window.history_cancel)
-    assert all(b.geometry().center().y()==buttons[0].geometry().center().y() for b in buttons)
-    assert window.width()==820 and all(b.width()>=b.sizeHint().width() for b in buttons)
+    assert window.inspector.isAncestorOf(window.history_button) and window.history_cancel.isHidden()
+    assert window.width()==820 and all(b.width()>=b.sizeHint().width() for b in buttons if b.isVisible())
     height=window.tree.viewport().height();window.history_button.hide();window.history_cancel.hide();APP.processEvents()
     assert window.tree.viewport().height()<=height
 

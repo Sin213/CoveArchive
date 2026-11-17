@@ -25,7 +25,10 @@ def _keys(obj, expected):
 
 
 def _validated(data):
-    _keys(data, ("version", "archive_root", "window", "repositories"))
+    fields = ("version", "archive_root", "window", "repositories")
+    _keys(data, (*fields, "appearance") if isinstance(data, dict) and "appearance" in data else fields)
+    if "appearance" in data and (not isinstance(data["appearance"], str) or data["appearance"] not in ("light", "dark")):
+        raise ValueError("Invalid appearance.")
     if type(data["version"]) is not int or data["version"] != 1:
         raise ValueError("Unsupported preference version.")
     root = data["archive_root"]
@@ -56,9 +59,11 @@ def _validated(data):
             raise ValueError("Invalid formats or prerelease choice.")
         normalized[key] = {"include": list(rules.include), "exclude": list(rules.exclude),
                            "extensions": list(extensions), "prereleases": rule["prereleases"]}
-    return {"version": 1, "archive_root": root, "repositories": normalized,
+    result = {"version": 1, "archive_root": root, "repositories": normalized,
             "window": {"width": max(820, min(3840, window["width"])),
                        "height": max(520, min(2160, window["height"])), "tab": window["tab"]}}
+    if "appearance" in data: result["appearance"] = data["appearance"]
+    return result
 
 
 def _object(pairs):

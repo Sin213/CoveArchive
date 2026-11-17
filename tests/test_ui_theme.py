@@ -187,13 +187,13 @@ def test_browse_empty_and_provider_are_passive(ui):
     empty = [label for label in window.tabs.widget(0).findChildren(QLabel)
              if 'nothing is scanned automatically' in label.text().lower()]
     assert len(empty) == 1 and empty[0].isVisible()
-    assert window.tree.geometry().intersects(empty[0].geometry()) or empty[0].parent() is window.tree.viewport()
+    assert window.tree.viewport().isAncestorOf(empty[0])
     for url, provider in (('https://github.com/Owner/Repo', 'GitHub'),
             ('https://codeberg.org/Owner/Repo', 'Codeberg'),
             ('https://gitlab.com/group/project', 'GitLab'), ('not a URL', 'Unsupported')):
         window.url.setText(url)
         assert any(label.isVisible() and label.text() == provider
-                   for label in window.tabs.widget(0).findChildren(QLabel))
+                   for label in window.toolbar.findChildren(QLabel))
     assert not controller.calls
     succeed(window, controller, release())
     assert not empty[0].isVisible()
@@ -269,7 +269,7 @@ def test_browse_provider_updates_without_scan(ui):
             ('<b>https://evil.example/?token=secret</b>', 'Unsupported')):
         window.url.setText(url)
         assert any(label.text() == expected and label.isVisible()
-                   for label in window.tabs.widget(0).findChildren(QLabel))
+                   for label in window.toolbar.findChildren(QLabel))
     assert not controller.calls
 
 
@@ -381,7 +381,7 @@ def test_library_headings_empty_states_and_tones(ui):
     from PySide6.QtWidgets import QLabel, QFrame
     window, controller = ui; window.tabs.setCurrentIndex(2); panel = window.library_panel
     labels = panel.findChildren(QLabel)
-    assert {'Collections', 'Repositories'} <= {label.text() for label in labels}
+    assert {'COLLECTIONS', 'REPOSITORIES'} <= {label.text() for label in labels}
     empty = [label for label in labels if 'Import' in label.text() and 'URL' in label.text()]
     assert len(empty) == 1 and empty[0].isVisible()
     placeholder = [label for label in labels if 'Select a repository' in label.text()]
@@ -488,7 +488,8 @@ def test_polish_header_has_no_nested_frame(ui, tab):
 @pytest.mark.parametrize('control', ['url', 'browse', 'prereleases', 'tree', 'tabs'])
 def test_polish_focus_is_visible_without_geometry_shift(ui, control):
     window, _ = ui
-    widget = window.tabs.tabBar() if control == 'tabs' else getattr(window, control)
+    if control=='prereleases': window.filter_toggle.click(); APP.processEvents()
+    widget = window.nav if control == 'tabs' else getattr(window, control)
     for value in (Qt.ColorScheme.Light, Qt.ColorScheme.Dark):
         scheme(value)
         other = window.browse if control == 'url' else window.url
@@ -523,7 +524,7 @@ def test_polish_provider_badge(ui):
         badge=window.provider; image=badge.grab().toImage()
         assert pixel(image,2,badge.height()/2) == QColor(TOKENS[name]['selection'])
         assert badge.text() == 'GitHub' and not badge.wordWrap()
-        assert abs(badge.geometry().center().y()-window.scan.geometry().center().y()) <= 1
+        assert abs(badge.mapTo(window,badge.rect().center()).y()-window.scan.mapTo(window,window.scan.rect().center()).y()) <= 1
         assert badge.height() <= window.scan.height()+2 and window.width() == 820
 
 
@@ -568,7 +569,7 @@ def test_repair_r3_scan_overlay(ui):
     assert not window.empty.isVisible() or 'choose a repository' not in window.empty.text().lower()
     window.cancel.click()
     assert not window.empty.isVisible() or 'choose a repository' not in window.empty.text().lower()
-    controller.finish(None,'CANCELLED'); assert 'Nothing is scanned automatically' in window.empty.text()
+    controller.finish(None,'CANCELLED'); assert window.empty.text()=='No repository scanned'
 
 
 def test_repair_r4_empty_queue_summary(queue_ui):
@@ -665,9 +666,12 @@ def test_r2_shutdown_and_clear_tooltips(ui):
 
 def test_r2_elided_label_height(ui):
     window,_=ui; window.resize(820,520)
-    for label in (window.destination,window.status,window.summary,window.detail):
+    for label in (window.status,window.summary,window.detail):
         label.setText('Long text '*100); APP.processEvents()
         assert label.height()==label.sizeHint().height()
+    window.destination.setText('Long path '*100); APP.processEvents()
+    assert window.destination.wordWrap() and window.destination.hasHeightForWidth()
+    assert window.destination.toolTip()==window.destination.text()
 
 
 def test_r2_elided_clear_tooltip(ui):
@@ -677,7 +681,7 @@ def test_r2_elided_clear_tooltip(ui):
 
 @pytest.mark.parametrize('kind,expected', [
     ('no_releases', 'No releases found'),
-    ('prerelease', '1 prereleases hidden'),
+    ('prerelease', '1 prerelease hidden'),
     ('no_formats', 'No formats selected'),
     ('no_matches', 'No matching assets')])
 def test_r3_browse_result_overlay(ui,kind,expected):
@@ -692,13 +696,13 @@ def test_r3_browse_result_overlay(ui,kind,expected):
     APP.processEvents()
     assert window.status.text()==expected
     if kind in ('no_formats','no_matches'):
-        assert window.tree.model().rowCount()>0 and not window.empty.isVisible()
+        assert window.tree.model().rowCount()>0 and not window.empty.isVisible() and window.release_meta.text()==expected
         assert window.preview.text()==('Rules match 0 of 0 eligible assets' if kind=='no_formats' else 'Rules match 0 of 1 eligible assets')
     else:
         assert window.tree.model().rowCount()==0
         assert window.empty.isVisible() and window.empty.text()==expected
-        assert window.empty.parentWidget() is window.tree.viewport()
-        assert window.tree.viewport().rect().contains(window.empty.geometry())
+        assert window.tree.viewport().isAncestorOf(window.empty)
+        assert window.tree.viewport().rect().contains(window.empty.mapTo(window.tree.viewport(),window.empty.rect().center()))
     assert window.empty.textFormat()==Qt.PlainText and window.empty.alignment()==Qt.AlignCenter
     window.prereleases.setChecked(True); window.formats['.zip'].setChecked(True)
     window.include.clear(); window._rules_changed()
@@ -706,11 +710,11 @@ def test_r3_browse_result_overlay(ui,kind,expected):
     assert not window.empty.isVisible()
     for state,result in (('FAILED',ScanFailure('a'*32,'network')),('CANCELLED',None)):
         window.url.setText(URL); window.scan.click()
-        assert not window.empty.isVisible()
-        window.cancel.click(); assert not window.empty.isVisible()
+        assert window.empty.isVisible() and window.empty.text()=='Scanning releases'
+        window.cancel.click(); assert window.empty.isVisible()
         controller.finish(result,state); APP.processEvents()
         assert window.empty.isVisible()
-        assert window.empty.text()=='Choose a repository and select Scan.\nNothing is scanned automatically.'
+        assert window.empty.text()==(window.status.text() if state=='FAILED' else 'No repository scanned')
 
 
 def test_r3_scrollbar_token_contrast():

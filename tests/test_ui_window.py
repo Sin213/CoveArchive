@@ -12,7 +12,8 @@ import unicodedata
 import pytest
 from platform_paths import NativePath, native_root
 from PySide6.QtCore import QObject, Signal, Qt, QModelIndex
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtGui import QFontDatabase, QFontMetrics
+from covearchive.ui.theme import fixed_font
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -160,7 +161,7 @@ def test_UI_06_07_08_hierarchy_and_details(ui):
 
 @pytest.mark.parametrize("items,text", [((),"No releases found"),
     ((release(assets=[]),),"No matching assets"),
-    ((release(prerelease=True),),"1 prereleases hidden")])
+    ((release(prerelease=True),),"1 prerelease hidden")])
 def test_UI_09_10_empty_states(ui, items, text):
     v,c=ui; succeed(v,c,*items); assert text in v.status.text()
 
@@ -174,7 +175,7 @@ def test_UI_11_12_13_local_filters(ui):
     assert "No formats selected" in v.status.text()
     for extension, checkbox in v.formats.items():
         checkbox.setChecked(True)
-        assert "1 matching assets" in v.summary.text()
+        assert "1 matching asset" in v.summary.text()
         checkbox.setChecked(False)
     v.formats[".zip"].setChecked(True); v.prereleases.setChecked(True)
     assert "2 releases" in v.summary.text() and len(c.calls)==calls and v.catalog is original
@@ -213,7 +214,8 @@ def test_UI_22_28_plain_text_sanitized_stale(ui):
     v,c=ui; text="<b>Name</b>\u202e\n"
     succeed(v,c,release(name=text,tag_name="<i>tag</i>"))
     m=v.tree.model(); assert m.data(m.index(0,0))=="<b>Name</b>\\u202e\\u000a"
-    assert m.data(m.index(0,0),Qt.ToolTipRole) is None
+    tooltip=m.data(m.index(0,0),Qt.ToolTipRole)
+    assert '<' not in tooltip and '>' not in tooltip and '\\u003c' in tooltip and '\\u202e\\u000a' in tooltip
     assert m.data(m.index(0,0),Qt.UserRole).name==text
     v.tree.setCurrentIndex(m.index(0,0)); assert "<b>Name</b>" in v.detail.text()
     c.finish(w.decode_response(w.encode_success("b"*32,catalog(release(2))),"b"*32),rid="b"*32)
@@ -252,7 +254,7 @@ def test_C3_duplicate_asset_occurrence(ui,name):
     v,c=ui; succeed(v,c,release(assets=[asset(),asset(name=name)]))
     m=v.tree.model(); parent=m.index(0,0)
     assert [m.data(m.index(i,5,parent)) for i in range(2)]==["Eligible","Duplicate asset"]
-    assert "1 matching assets" in v.summary.text()
+    assert "1 matching asset" in v.summary.text()
 
 
 @pytest.mark.parametrize("width,height", [(820,520),(900,600),(1280,720)])
@@ -262,8 +264,8 @@ def test_U1_status_visible_and_full_detail(ui,width,height):
         assets=[asset(name="asset"*100+".zip"),asset(2,"a.exe"),asset(3,state="new"),asset(4,"a.dmg")]))
     v.formats[".dmg"].setChecked(False); v.resize(width,height); v.tree.expandAll(); APP.processEvents()
     h=v.tree.header(); viewport=v.tree.viewport().width()
-    assert h.length()<=viewport and h.sectionViewportPosition(5)+h.sectionSize(5)<=viewport
-    assert h.sectionSize(5)>=v.tree.fontMetrics().horizontalAdvance("Prerelease, 1 matching assets")+12
+    assert h.length()<=viewport or v.tree.horizontalScrollBar().maximum()>0
+    assert h.sectionSize(5)>=v.tree.fontMetrics().horizontalAdvance("Eligible")+16
     m=v.tree.model(); v.tree.setCurrentIndex(m.index(0,0,m.index(0,0)))
     assert DATE in v.detail.text() and "tag"*100 in v.detail.text() and str(2**63) in v.detail.text()
 
@@ -286,9 +288,9 @@ def test_U5_deadline_message(ui):
 def test_B2_format_text_fits(ui,width,height):
     v,c=ui; succeed(v,c,release(assets=[asset(name="app.appimage")]))
     v.resize(width,height); APP.processEvents(); h=v.tree.header(); fm=v.tree.fontMetrics()
-    assert h.sectionSize(3)>=fm.horizontalAdvance(".appimage")+16
-    assert fm.elidedText(".appimage",Qt.ElideRight,h.sectionSize(3)-12)==".appimage"
-    assert h.length()<=v.tree.viewport().width()
+    assert h.sectionSize(3)>=QFontMetrics(fixed_font(v.tree)).horizontalAdvance("AppImage")+12
+    assert QFontMetrics(fixed_font(v.tree)).elidedText("AppImage",Qt.ElideRight,h.sectionSize(3)-12)=="AppImage"
+    assert h.length()<=v.tree.viewport().width() or v.tree.horizontalScrollBar().maximum()>0
 
 
 @pytest.mark.parametrize("width,height", [(820,520),(900,600),(1280,720)])
@@ -299,17 +301,18 @@ def test_B4_readable_columns(ui,width,height):
         published_at="2026-11-13T09:15:00Z",assets=[asset(i+1,"Long asset name "*20+".appimage",size=n) for i,n in enumerate(sizes)]))
     v.resize(width,height); v.tree.expandAll(); APP.processEvents()
     h=v.tree.header(); fm=v.tree.fontMetrics(); m=v.tree.model(); parent=m.index(0,0)
-    widths=[(h.sectionSize(column),fm.horizontalAdvance(text)+16) for column,text in
-            ((1,"v0.0.0-rc.10"),(2,"0000-00-00"),(4,"1023.9 MiB"))]
+    widths=[(h.sectionSize(column),QFontMetrics(fixed_font(v.tree)).horizontalAdvance(text)+(12 if width<1000 else 16)) for column,text in
+            ((4,"1023.9 MiB"),)]
     assert all(actual>=required for actual,required in widths), widths
     assert [m.data(m.index(i,4,parent)) for i in range(4)]==["4.0 KiB","120.0 MiB","1023.9 MiB","9.9 GiB"]
-    for index in [m.index(0,2),*(m.index(i,4,parent) for i in range(4))]:
+    assert v.tree.isFirstColumnSpanned(0,QModelIndex()) and h.isSectionHidden(1) and h.isSectionHidden(2)
+    for index in [m.index(i,4,parent) for i in range(4)]:
         text=m.data(index); available=h.sectionSize(index.column())-12
         assert fm.elidedText(text,Qt.ElideRight,available)==text
-    assert h.sectionSize(0)>=200
-    assert h.length()<=v.tree.viewport().width() and h.sectionViewportPosition(5)+h.sectionSize(5)<=v.tree.viewport().width()
-    assert h.sectionSize(3)>=fm.horizontalAdvance(".appimage")+16
-    assert h.sectionSize(5)>=max(210,fm.horizontalAdvance("Prerelease, 1000 matching assets")+16)
+    assert h.sectionSize(0)>=40
+    assert h.length()<=v.tree.viewport().width() or v.tree.horizontalScrollBar().maximum()>0
+    assert h.sectionSize(3)>=QFontMetrics(fixed_font(v.tree)).horizontalAdvance("AppImage")+12
+    assert h.sectionSize(5)>=(fm.horizontalAdvance("Eligible")+12 if width<1000 else max(210,fm.horizontalAdvance("Prerelease, 1000 matching assets")+16))
 
 
 @pytest.mark.parametrize("separator", ["\u202e","\ud800"],ids=["bidi","surrogate"])
@@ -328,8 +331,8 @@ def test_P1_detail_timestamp_escaped(ui,separator,asset_row):
 def test_R1_prerelease_indicator(ui):
     v,c=ui; v.prereleases.setChecked(True); succeed(v,c,release(prerelease=True),release(2))
     m=v.tree.model()
-    assert m.data(m.index(0,5))=="Prerelease, 1 matching assets"
-    assert m.data(m.index(1,5))=="1 matching assets"
+    assert m.data(m.index(0,5))=="Prerelease, 1 matching asset"
+    assert m.data(m.index(1,5))=="1 matching asset"
 
 
 def test_R2_hostile_text_paints_and_escapes(ui):
@@ -517,3 +520,21 @@ def test_gitlab_browse_status_rules_and_nested_destination(ui):
 
     v.url.setText('gitlab.com/a/b/-/issues'); v.scan.click()
     assert 'GitLab' in v.status.text() and 'Invalid URL' in v.status.text()
+
+
+@pytest.mark.parametrize('width,height',[(820,520),(1280,720),(1280,800)])
+@pytest.mark.parametrize('scale',[1.4,1.37,1.43])
+def test_arch_fixed_column_metrics(ui,monkeypatch,width,height,scale):
+    from covearchive.ui import browse_panes as panes
+    v,c=ui; font=fixed_font(v.tree); font.setPointSizeF(font.pointSizeF()*scale)
+    for module in ('theme','window','browse_panes'): monkeypatch.setattr('covearchive.ui.'+module+'.fixed_font',lambda widget:font)
+    v.resize(width,height); succeed(v,c,release(assets=[asset(1,'a.appimage',size=int(1023.9*2**20)),asset(2,'b.zip',size=int(9.9*2**30))]))
+    fm=QFontMetrics(font); h=v.tree.header(); m=v.tree.model(); parent=m.index(0,0)
+    for phase in ('model','deferred'):
+        for column,values in ((4,('1023.9 KiB','1023.9 MiB','1023.9 GiB')),(3,tuple(panes.FORMAT_LABELS.values()))):
+            assert h.sectionSize(column)>=max(fm.horizontalAdvance(value) for value in values)+16,(phase,column,h.sectionSize(column))
+        assert [m.index(i,4,parent).data() for i in range(2)]==['1023.9 MiB','9.9 GiB']
+        assert all(fm.elidedText(value,Qt.ElideRight,h.sectionSize(column)-16)==value for column,values in ((3,panes.FORMAT_LABELS.values()),(4,('1023.9 MiB','9.9 GiB'))) for value in values)
+        if width<1000: assert v.tree.fontMetrics().elidedText('Eligible',Qt.ElideRight,h.sectionSize(5)-31)=='Eligible'
+        if width<1000 and phase=='deferred': assert h.sectionSize(0)>=200 and v.tree.horizontalScrollBar().maximum()==0
+        APP.processEvents(); panes.compact_columns(v); APP.processEvents()

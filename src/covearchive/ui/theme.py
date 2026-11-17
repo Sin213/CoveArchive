@@ -1,19 +1,32 @@
 """System-following widget colors, semantic roles and explicit theme lifecycle."""
-from PySide6.QtCore import QObject, Qt
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import QObject, Qt, Signal
+from functools import lru_cache
+from PySide6.QtGui import QColor, QPalette, QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication
 
 
 TOKENS = {
-    'light': dict(surface='#f3f6f7', card='#ffffff', text='#182e35',
-        muted='#52656c', border='#74878e', accent='#006b62', accent_text='#ffffff',
-        danger='#a82d35', warning='#805500', success='#17643c', selection='#c8e9e3',
-        selection_text='#123d37', focus='#007a70', disabled='#596b72', disabled_surface='#e3e9eb'),
-    'dark': dict(surface='#172328', card='#101b20', text='#edf5f6',
-        muted='#b9cbd1', border='#718b94', accent='#64dbc7', accent_text='#102c28',
-        danger='#ffb4b9', warning='#f3ce79', success='#9ce2b5', selection='#285c55',
-        selection_text='#f1fffb', focus='#64dbc7', disabled='#8d9fa5', disabled_surface='#25343a'),
+    'light': dict(surface='#f5f1e8', card='#fffaf1', text='#29251e',
+        toolbar='#eee8dd', center='#fffaf1', panel='#f0ebe1', input='#fffaf1', hover='#e9e2d6',
+        line='#d8d0c3', faint='#655e52', muted='#655e52', border='#817668', accent='#006b5b', accent_text='#ffffff',
+        danger='#a02f25', warning='#805500', success='#17643c', selection='#d4e8de',
+        selection_text='#213b32', focus='#006b5b', disabled='#655e52', disabled_surface='#e9e2d6'),
+    'dark': dict(surface='#1c1b19', card='#181715', text='#ece6d6',
+        toolbar='#161513', center='#141312', panel='#181715', input='#0f0e0d', hover='#24221f',
+        line='#2e2b27', faint='#a8a194', muted='#a8a194', border='#897f70', accent='#5fd4c0', accent_text='#0b2622',
+        danger='#ef8b7c', warning='#e3bd6e', success='#93d4a6', selection='#1b2624',
+        selection_text='#ece6d6', focus='#5fd4c0', disabled='#a8a194', disabled_surface='#24221f'),
 }
+
+
+@lru_cache(maxsize=1)
+def _fixed_family():
+    families=QFontDatabase.families()
+    return next((name for name in ('Cascadia Mono','Consolas','DejaVu Sans Mono','Noto Sans Mono','Liberation Mono') if name in families),QFontDatabase.systemFont(QFontDatabase.FixedFont).family())
+
+
+def fixed_font(widget):
+    font=QFont(_fixed_family()); font.setPointSizeF(widget.font().pointSizeF()); return font
 
 
 def set_property(widget, name, value):
@@ -69,17 +82,36 @@ def build_stylesheet(t):
     return f'''
         QWidget {{ background: {t['surface']}; color: {t['text']}; }}
         QLabel {{ background: transparent; }}
+        QWidget[stateSurface="true"] {{ background: {t['card']}; }}
+        QLabel[chip="true"] {{ background: {t['hover']}; border: 1px solid {t['line']}; border-radius: 4px; padding: 2px; }}
+        QLabel[inspectorHeading="true"] {{ color: {t['muted']}; font-weight: 600; }}
+        QLabel[title="true"] {{ font-weight: 600; }}
+        QLabel[stateHeading="true"] {{ font-size: 15px; font-weight: 600; color: {t['text']}; }}
+        QLabel[stateHint="true"] {{ font-size: 11px; color: {t['muted']}; }}
+        QFrame[examplePanel="true"] {{ background: {t['panel']}; border: 1px solid {t['line']}; border-radius: 6px; }}
+        QProgressBar#scanBusy {{ min-height: 4px; max-height: 4px; border: none; }}
+        QProgressBar#scanBusy::chunk {{ background: {t['accent']}; border: none; }}
+        QStatusBar {{ border: none; padding: 2px 4px; }}
+        QStatusBar::item {{ border: none; }}
+        QMenu {{ background: {t['card']}; color: {t['text']}; border: 1px solid {t['border']}; }}
+        QMenu::item:selected {{ background: {t['selection']}; color: {t['selection_text']}; }}
+        QSplitter::handle {{ background: {t['line']}; margin-left: 2px; margin-right: 2px; }}
+        QFrame#topToolbar {{ background: {t['toolbar']}; border-bottom: 1px solid {t['line']}; }}
+        QFrame#urlContainer {{ background: {t['input']}; border: 1px solid {t['border']}; border-radius: 5px; }}
+        QPushButton[chrome="true"] {{ background: transparent; border-color: transparent; padding: 4px; }}
+        QPushButton[chrome="true"]:hover {{ background: {t['hover']}; border-color: {t['border']}; }}
+        QPushButton[chrome="true"]:focus {{ border: 2px solid {t['focus']}; padding: 3px; }}
         QFrame[section="card"] {{ background: {t['card']}; border: 1px solid {t['border']}; border-radius: 5px; }}
         QFrame[section="card"] QLabel, QFrame[section="card"] QCheckBox {{ background: transparent; }}
         QLabel[notice="true"] {{ background: {t['card']}; border-left: 3px solid {t['warning']}; padding: 5px 8px; }}
         QLabel[notice="true"][tone="error"] {{ border-left-color: {t['danger']}; }}
         QWidget#queuePage QPushButton {{ padding: 5px 11px; }}
         QWidget#queuePage QPushButton:focus {{ padding: 4px 10px; }}
+        QWidget#queuePage QTableView::item {{ padding: 6px 4px; }}
         QLabel[heading="true"] {{ font-weight: 600; color: {t['muted']}; }}
         QWidget#libraryPage QPushButton {{ padding: 4px 8px; }}
         QWidget#libraryPage QPushButton:focus {{ padding: 3px 7px; }}
         QTableView#repositoryTable::item:selected {{ background: {t['selection']}; color: {t['selection_text']}; border-bottom: 1px solid {t['accent']}; }}
-        QLabel#brandTitle {{ font-weight: 600; }}
         QWidget#browsePage QPushButton {{ padding: 3px 8px; }}
         QWidget#browsePage QPushButton:focus {{ padding: 2px 7px; }}
         QWidget#browsePage QCheckBox {{ padding: 1px; spacing: 3px; border-radius: 4px; }}
@@ -135,7 +167,7 @@ def build_stylesheet(t):
         QTabBar::tab {{ background: {t['surface']}; color: {t['muted']};
             border: 1px solid transparent; padding: 7px 17px; }}
         QTabBar::tab:selected {{ background: {t['card']}; color: {t['text']};
-            border-bottom: 2px solid {t['accent']}; padding-bottom: 6px; font-weight: 600; }}
+            border-bottom: 2px solid {t['accent']}; padding-bottom: 6px; font-weight: 400; }}
         QTabBar::tab:focus {{ padding: 6px 16px; }}
         QToolTip {{ background: {t['card']}; color: {t['text']};
             border: 1px solid {t['border']}; padding: 5px; }}
@@ -152,19 +184,38 @@ def build_stylesheet(t):
 
 class ThemeTracker(QObject):
     """Parent ownership handles destruction; close also disconnects explicitly."""
-    def __init__(self, window):
+    changed = Signal()
+
+    def __init__(self, window, override=None):
         super().__init__(window)
         self.window = window
         self.hints = QApplication.instance().styleHints()
+        self.override = override
+        self.system_scheme = self.hints.colorScheme()
         self.hints.colorSchemeChanged.connect(self.apply)
-        self.apply(self.hints.colorScheme())
+        if override is not None: self.set_override(override)
+        else: self.apply(self.hints.colorScheme())
 
     def apply(self, scheme):
-        name = resolve_scheme(scheme, QApplication.instance().palette())
+        if self.override is None: self.system_scheme = scheme
+        name = self.override or resolve_scheme(scheme, QApplication.instance().palette())
         tokens = TOKENS[name]
         self.window.setProperty("themeName",name)
         self.window.setPalette(build_palette(tokens))
         self.window.setStyleSheet(build_stylesheet(tokens))
+        self.changed.emit()
+
+    def set_override(self, name):
+        if name not in (None, 'light', 'dark'): raise ValueError('Invalid appearance')
+        self.override = name
+        try:
+            if name is None: self.hints.unsetColorScheme()
+            else: self.hints.setColorScheme(Qt.ColorScheme.Dark if name == 'dark' else Qt.ColorScheme.Light)
+        except (AttributeError, RuntimeError): pass
+        self.apply(self.hints.colorScheme() if name is None else self.system_scheme)
 
     def disconnect(self):
         self.hints.colorSchemeChanged.disconnect(self.apply)
+        if self.override is not None:
+            try: self.hints.unsetColorScheme()
+            except (AttributeError,RuntimeError): pass

@@ -27,6 +27,23 @@ def test_roundtrip_and_repository_isolation(tmp_path):
     assert 400 <= loaded["window"]["height"] <= 2160
 
 
+@pytest.mark.parametrize('appearance',['light','dark'])
+def test_optional_appearance_roundtrip(tmp_path,appearance):
+    store=PreferenceStore(tmp_path/'prefs.json'); prefs=store.load()[0]
+    assert 'appearance' not in prefs
+    prefs['appearance']=appearance
+    assert store.save(prefs) is None
+    assert PreferenceStore(store.path).load()[0]['appearance']==appearance
+
+
+@pytest.mark.parametrize('appearance',[None,'system','',True,[],{}])
+def test_invalid_appearance_latches_readonly(tmp_path,appearance):
+    path=tmp_path/'prefs.json'; prefs=PreferenceStore(path).load()[0]
+    prefs['appearance']=appearance; raw=json.dumps(prefs); path.write_text(raw)
+    store=PreferenceStore(path); _,problem,writable=store.load()
+    assert problem and not writable and path.read_text()==raw
+
+
 @pytest.mark.parametrize("data", [b"broken", b'{"version":2}', b'{"version":1,"version":1}',
     b'{"version":NaN}', b"x"*(256*1024+1),
     b'{"version":1,"archive_root":null,"window":{"width":900,"height":600,"tab":"browse"},"repositories":{"o/r":{"include":[],"exclude":[],"extensions":[],"prereleases":false,"token":"SECRET"}}}',
@@ -116,3 +133,18 @@ def test_external_changes_preserved(ui,kind):
     assert "changed on disk" in v.rule_error.text() and not v.preferences.writable
     assert v.preferences.path.read_bytes()==data and v.preferences.save(v.settings)
     assert v.preferences.path.read_bytes()==data
+
+
+@pytest.mark.parametrize('appearance',[None,'light','dark'])
+def test_m1_baseline_bytes_and_older_reader(tmp_path,monkeypatch,appearance):
+    from covearchive.ui import preferences as module
+    store=PreferenceStore(tmp_path/'prefs.json'); prefs=store.load()[0]
+    if appearance: prefs['appearance']=appearance
+    assert store.save(prefs) is None
+    baseline=b'{"version":1,"archive_root":null,"repositories":{},"window":{"width":1180,"height":720,"tab":"browse"}}\n'
+    raw=store.path.read_bytes(); assert raw==(baseline if appearance is None else baseline[:-2]+b',"appearance":"'+appearance.encode()+b'"}\n')
+    if appearance: # Older builds reject the extra key, latch read-only, and preserve the file.
+        original=module._validated
+        def older(data): module._keys(data,('version','archive_root','window','repositories')); return original(data)
+        monkeypatch.setattr(module,'_validated',older); reader=PreferenceStore(store.path); _,problem,writable=reader.load()
+        assert problem and not writable and reader.save(prefs) and store.path.read_bytes()==raw
