@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+appdir=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+exec "$appdir/usr/lib/covearchive/CoveArchive" "$@"

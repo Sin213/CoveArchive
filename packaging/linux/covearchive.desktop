@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=CoveArchive
+Comment=Preserve public project release assets locally
+Exec=covearchive
+Icon=covearchive
+Terminal=false
+Categories=Utility;Archiving;
+StartupNotify=true

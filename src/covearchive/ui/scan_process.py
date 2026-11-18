@@ -74,6 +74,10 @@ class ScanController(QObject):
         env = QProcessEnvironment()
         for key in ENV_KEYS:
             if key in os.environ: env.insert(key, os.environ[key])
+        if getattr(sys, "frozen", False):
+            # Reuse this application's PyInstaller extraction for worker children.
+            for key in ("_PYI_ARCHIVE_FILE", "_PYI_APPLICATION_HOME_DIR", "_PYI_PARENT_PROCESS_LEVEL", "_PYI_SPLASH_IPC"):
+                if key in os.environ: env.insert(key, os.environ[key])
         process.setProcessEnvironment(env)
         modifier = getattr(process, "setCreateProcessArgumentsModifier", None)
         if sys.platform == "win32" and modifier is not None:

@@ -354,6 +354,18 @@ tests run only on their target platform, and Git-history tests require Git.
 The `--smoke-test` launcher option is a developer diagnostic that briefly opens
 and closes the application.
 
+### Release builds
+
+The development workflow uses `workflow_dispatch` with an exact commit to build
+draft-only releases for manual publication. Its artifacts are
+`CoveArchive-1.0.0-Setup.exe`, `CoveArchive-1.0.0-Portable.exe`,
+`CoveArchive-1.0.0-x86_64.AppImage`, `covearchive_1.0.0_amd64.deb` and
+`SHA256SUMS.txt`. Builds are unsigned. Windows requires 64-bit Windows 10 or newer;
+Linux requires x86_64, glibc >= 2.35 and desktop libraries. Git 2.45 or newer is
+optional for Git history. The portable exe uses the same local data directory
+as the installer. There is no auto-update. This workflow does not mean published
+downloads are available yet.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
