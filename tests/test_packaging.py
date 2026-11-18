@@ -7,6 +7,7 @@ import json
 import marshal
 import os
 import re
+import shutil
 from pathlib import Path
 import runpy
 import subprocess
@@ -15,6 +16,8 @@ import tarfile
 import sys
 from unittest.mock import patch
 import zipfile
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -322,6 +325,93 @@ def test_windows_ci_installation_oracles():
     assert "[Environment]::GetFolderPath('LocalApplicationData')" in script
     assert "$sentinelDir = Join-Path $dataRoot ('packaging-' + [Guid]::NewGuid().ToString('N'))" in script
     assert 'finally {' in script and 'Remove-Item -LiteralPath $sentinelDir' in script
+
+
+def run_powershell(script, env=None):
+    executable = shutil.which('powershell') or shutil.which('pwsh')
+    if executable is None:
+        pytest.skip('PowerShell is not installed')
+    return subprocess.run([executable, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+                          env=env, capture_output=True, text=True, timeout=20)
+
+
+@pytest.mark.parametrize('actual,pin,parts,accepted', [
+    ('6.7.1', '6.7.1', (6, 7, 1), True),
+    ('6.7.1.0', '6.7.1', (6, 7, 1), True),
+    (' \t6.7.1.0\r\n', '6.7.1', (6, 7, 1), True),
+    ('6.7.1.42', '6.7.1', (6, 7, 1), True),
+    ('7.7.1', '6.7.1', (7, 7, 1), False),
+    ('6.8.1', '6.7.1', (6, 8, 1), False),
+    ('6.7.2', '6.7.1', (6, 7, 2), False),
+    ('6.7.10', '6.7.1', (6, 7, 10), False),
+    ('6.7', '6.7.1', (6, 7, 1), False),
+    ('6.7.1.beta', '6.7.1', (6, 7, 1), False),
+    ('6.7.1-beta', '6.7.1', (6, 7, 1), False),
+    ('6.7.1 (a)', '6.7.1', (6, 7, 1), False),
+    ('06.7.1', '6.7.1', (6, 7, 1), False),
+    ('6.07.1', '6.7.1', (6, 7, 1), False),
+    ('6.7.01', '6.7.1', (6, 7, 1), False),
+    ('6.7.1.00', '6.7.1', (6, 7, 1), False),
+    ('', '6.7.1', (6, 7, 1), False),
+    (None, '6.7.1', (6, 7, 1), False),
+    ('6.7.1', '6.7', (6, 7, 1), False),
+    ('6.7.1', '6.7.1.0', (6, 7, 1), False),
+    ('6.7.1', '6.7.1-beta', (6, 7, 1), False),
+    ('6.7.1', '06.7.1', (6, 7, 1), False),
+    ('6.7.1', '6.7.1\n', (6, 7, 1), False),
+    ('6.7.1', '', (6, 7, 1), False),
+    ('6.7.1', '6.7.1', (7, 7, 1), False),
+    ('6.7.1', '6.7.1', (6, 8, 1), False),
+    ('6.7.1', '6.7.1', (6, 7, 2), False),
+])
+def test_windows_inno_version(actual, pin, parts, accepted):
+    env = os.environ.copy()
+    env['INNO_TEST_HELPER'] = str(ROOT / 'packaging/windows_inno_version.ps1')
+    env['INNO_TEST_CASE'] = json.dumps(dict(ProductVersion=actual, FileVersion='diagnostic-file-version',
+        ProductMajorPart=parts[0], ProductMinorPart=parts[1], ProductBuildPart=parts[2], pin=pin))
+    result = run_powershell('''
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+. $env:INNO_TEST_HELPER
+$case = $env:INNO_TEST_CASE | ConvertFrom-Json
+try { Assert-InnoVersion $case $case.pin; 'accepted' }
+catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+''', env)
+    assert (result.returncode == 0) == accepted, (result.stdout, result.stderr)
+    if accepted:
+        assert result.stdout.strip() == 'accepted'
+    else:
+        assert 'ProductVersion=<' + (actual or '') + '>' in result.stderr
+        assert 'FileVersion=<diagnostic-file-version>' in result.stderr
+        assert 'pinned=<' + pin + '>' in result.stderr
+        if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', pin):
+            assert 'Invalid pinned Inno version' in result.stderr
+
+
+def test_windows_ci_enforces_inno_version():
+    script = (ROOT / 'packaging/windows_ci.ps1').read_text()
+    assert not re.search(r'-ne\s+\$env:INNO_VERSION\b', script, re.IGNORECASE)
+    assert '. "$PSScriptRoot/windows_inno_version.ps1"' in script
+    assert 'Assert-InnoVersion (Get-Item -LiteralPath $compiler).VersionInfo $env:INNO_VERSION' in script
+    assert script.index('Assert-InnoVersion ') < script.index('python -m pytest')
+    assert "$ErrorActionPreference = 'Stop'" in script
+    assert '$PSNativeCommandUseErrorActionPreference = $true' in script
+
+
+def test_packaging_powershell_parses():
+    env = os.environ.copy()
+    env['PACKAGING_PS_ROOT'] = str(ROOT / 'packaging')
+    result = run_powershell('''
+$ErrorActionPreference = 'Stop'
+Get-ChildItem -LiteralPath $env:PACKAGING_PS_ROOT -Filter '*.ps1' | ForEach-Object {
+    $tokens = $null; $parseErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+    $_.Name
+}
+''', env)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert set(result.stdout.split()) == {path.name for path in (ROOT / 'packaging').glob('*.ps1')}
 
 
 def test_windows_icon_has_all_required_sizes():

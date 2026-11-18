@@ -2,8 +2,9 @@
 import json
 from dataclasses import replace
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QLabel
+from PySide6.QtCore import Qt, QRect
+from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtWidgets import QDialog, QLabel, QWidget, QDialogButtonBox
 from PySide6.QtTest import QTest
 from test_ui_window import ui, APP, URL, isolated_data
 from test_ui_queue import job, view, S
@@ -91,7 +92,56 @@ def test_polish_settings_content_and_safe_paths(ui):
     assert {'System follows your operating system until you choose Light or Dark.','The folder must already exist and be writable.','Read-only; shown for support.'}<={x.text() for x in labels if x.property('tone')=='muted'}
     for edit in (d.preferences_path,d.queue_path):
         assert edit.toolTip() and '<b>' not in edit.toolTip() and edit.accessibleName() and edit.cursorPosition()==0
-    assert d.height()<=d.minimumSizeHint().height()+10
+    assert_settings_geometry(d)
+
+
+def assert_settings_geometry(d):
+    APP.processEvents()
+    layout=d.layout(); needed=layout.totalHeightForWidth(d.width())
+    # Word-wrapped labels need the height at the real width, not minimumSizeHint.
+    assert needed>0 and layout.totalMinimumHeightForWidth(d.width())<=d.height()
+    assert needed<=d.height()<=needed+10, (d.size(),needed)
+    cancel=d.findChild(QDialogButtonBox).button(QDialogButtonBox.Cancel)
+    controls=(d.appearance,d.root,d.browse,d.github_token,d.save_token,d.clear_token,
+              d.github_link,d.preferences_path,d.queue_path,d.save,cancel)
+    for child in controls:
+        assert child.isVisible() and child.isEnabled(), child.accessibleName()
+        minimum=child.minimumSizeHint()
+        assert child.width()>=minimum.width() and child.height()>=minimum.height(), child.accessibleName()
+    assert d.preferences_path.isReadOnly() and d.queue_path.isReadOnly()
+    leaves=[]
+    for child in d.findChildren(QWidget):
+        if not child.isVisible(): continue
+        rect=QRect(child.mapTo(d,child.rect().topLeft()),child.size())
+        assert d.contentsRect().contains(rect), (child.accessibleName(),rect,d.contentsRect())
+        if isinstance(child,QLabel) and child.wordWrap():
+            assert child.height()>=child.heightForWidth(child.width()), (child.text(),child.size())
+        if child in controls or isinstance(child,QLabel): leaves.append((child,rect))
+    # Compare labels and controls, excluding containers and their nested children.
+    for index,(child,rect) in enumerate(leaves):
+        for other,other_rect in leaves[index+1:]:
+            if child.isAncestorOf(other) or other.isAncestorOf(child): continue
+            assert not rect.intersects(other_rect), (child.accessibleName(),other.accessibleName(),rect,other_rect)
+
+
+def test_settings_geometry_with_wide_fonts():
+    from test_ui_window import isolated_window, FakeController, ROOT, until
+    original=QFont(APP.font())
+    families=QFontDatabase.families()
+    family=next((name for name in ('DejaVu Sans','Verdana') if name in families),original.family())
+    try:
+        for size in (9,10,11,12,16):
+            font=QFont(family,size); font.setStretch(125)
+            APP.setFont(font); APP.processEvents()
+            w=isolated_window(ROOT/'run_covearchive.py',FakeController())
+            try:
+                w.show(); APP.processEvents(); w.settings_button.click(); APP.processEvents()
+                assert w.settings_dialog.font().pointSize()==size and w.settings_dialog.font().stretch()==125
+                assert_settings_geometry(w.settings_dialog)
+            finally:
+                w.close(); until(lambda:w.bridge.closed); APP.processEvents()
+    finally:
+        APP.setFont(original); APP.processEvents()
 
 
 def test_polish_hidpi_icons(ui):

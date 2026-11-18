@@ -60,7 +60,10 @@ class SettingsDialog(QDialog):
         buttons=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel); layout.addWidget(buttons)
         self.save=buttons.button(QDialogButtonBox.Save); self.save.setAccessibleName('Save settings')
         buttons.accepted.connect(self._save); buttons.rejected.connect(self.reject)
-        self._refresh_access(); self._style_link(); self.adjustSize()
+        self._refresh_access(); self._style_link(); self.ensurePolished()
+        # adjustSize caps height to the screen and can compress wrapped form rows.
+        width=max(self.minimumWidth(),self.sizeHint().width())
+        self.resize(width,layout.totalHeightForWidth(width))
 
     def eventFilter(self,watched,event):
         if watched is self.github_token and event.type()==QEvent.KeyPress and event.key() in (Qt.Key_Return,Qt.Key_Enter):
