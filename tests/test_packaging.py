@@ -744,21 +744,69 @@ def test_draft_receipt_refuses_every_mismatch(tmp_path):
         else: raise AssertionError('unsafe draft accepted')
 
 
-def test_release_checksum_handoff_detects_swapped_artifact(tmp_path):
+def release_checksum_inputs(directory, names):
+    rows = {label: [] for label in ('windows', 'linux')}
+    for name in sorted(names):
+        data = name.encode('utf-8'); (directory / name).write_bytes(data)
+        label = 'windows' if name.endswith('.exe') else 'linux'
+        # Build sidecars may use uppercase; downloadable checksums must not.
+        rows[label].append(hashlib.sha256(data).hexdigest().upper() + '  ' + name + '\n')
+    outputs = {label: ''.join(lines) for label, lines in rows.items()}
+    for label, text in outputs.items():
+        (directory / (label + '.sha256')).write_bytes(text.encode('utf-8'))
+    return outputs
+
+
+def test_release_checksums_are_exact_per_artifact_files(tmp_path):
     module = runpy.run_path(str(ROOT / 'packaging/draft_release.py'))
-    rows = []
+    names = module['NAMES']; outputs = release_checksum_inputs(tmp_path, names)
+    expected = module['checksums'](tmp_path, outputs)
+    checksum_names = {name + '.sha256' for name in names}
+    assert set(expected) == names | checksum_names and len(expected) == 8
+    assert {p.name for p in tmp_path.iterdir()} == names | checksum_names | {'windows.sha256', 'linux.sha256'}
+    assert {p.name for p in tmp_path.glob('*.sha256')} - {'windows.sha256', 'linux.sha256'} == checksum_names
+    assert not list(tmp_path.rglob('SHA256SUMS.txt'))
+    for name in names:
+        artifact = (tmp_path / name).read_bytes()
+        digest = hashlib.sha256(artifact).hexdigest()
+        content = (tmp_path / (name + '.sha256')).read_bytes()
+        assert content == f'{digest}  {name}\n'.encode('utf-8')
+        assert expected[name] == {'size': len(artifact), 'sha256': digest}
+        assert expected[name + '.sha256'] == {'size': len(content), 'sha256': hashlib.sha256(content).hexdigest()}
+    # As with the old generated bundle, a local rerun needs fresh inputs.
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    with pytest.raises(ValueError, match='unexpected artifact input set'):
+        module['checksums'](tmp_path, outputs)
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
+def test_release_checksums_verify_with_sha256sum(tmp_path):
+    executable = shutil.which('sha256sum')
+    if executable is None:
+        pytest.skip('sha256sum is not installed')
+    module = runpy.run_path(str(ROOT / 'packaging/draft_release.py'))
+    outputs = release_checksum_inputs(tmp_path, module['NAMES'])
+    module['checksums'](tmp_path, outputs)
     for name in sorted(module['NAMES']):
-        data = name.encode(); (tmp_path / name).write_bytes(data)
-        rows.append(hashlib.sha256(data).hexdigest() + '  ' + name + '\n')
-    (tmp_path / 'windows.sha256').write_text(''.join(rows[:2]))
-    (tmp_path / 'linux.sha256').write_text(''.join(rows[2:]))
-    outputs = {'windows': ''.join(rows[:2]), 'linux': ''.join(rows[2:])}
-    assert len(module['checksums'](tmp_path, outputs)) == 5
-    (tmp_path / 'SHA256SUMS.txt').unlink()
-    (tmp_path / sorted(module['NAMES'])[0]).write_bytes(b'swapped')
-    try: module['checksums'](tmp_path, outputs)
-    except ValueError as exc: assert 'checksum mismatch' in str(exc)
-    else: raise AssertionError('swapped artifact accepted')
+        result = subprocess.run([executable, '-c', name + '.sha256'], cwd=tmp_path,
+                                capture_output=True, timeout=10)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+
+
+@pytest.mark.parametrize('mutation', ['swapped', 'missing', 'extra', 'old-bundle', 'generated-checksum'])
+def test_release_checksum_handoff_refuses_invalid_inputs(tmp_path, mutation):
+    module = runpy.run_path(str(ROOT / 'packaging/draft_release.py'))
+    outputs = release_checksum_inputs(tmp_path, module['NAMES'])
+    name = sorted(module['NAMES'])[0]
+    if mutation == 'swapped': (tmp_path / name).write_bytes(b'swapped')
+    elif mutation == 'missing': (tmp_path / name).unlink()
+    else:
+        extra = {'extra': 'extra.exe', 'old-bundle': 'SHA256SUMS.txt',
+                 'generated-checksum': name + '.sha256'}[mutation]
+        (tmp_path / extra).write_bytes(b'unexpected input')
+    message = 'artifact checksum mismatch' if mutation == 'swapped' else 'unexpected artifact input set'
+    with pytest.raises(ValueError, match=message):
+        module['checksums'](tmp_path, outputs)
 
 
 def test_release_integrity_requires_independent_job_outputs(tmp_path):
@@ -815,6 +863,9 @@ def test_version_metadata_and_artifact_contract():
     assert len(names) == 4 and all(__version__ in name for name in names)
     notes = (ROOT / 'packaging/release-notes.md').read_text()
     assert all(name in notes for name in names)
+    assert 'Each artifact has a matching `<artifact>.sha256` file' in notes
+    assert 'sha256sum -c <artifact>.sha256' in notes
+    assert 'SHA256SUMS.txt' not in notes
 
 
 def test_release_notes_document_unsigned_artifacts_without_announcing_downloads():
@@ -850,43 +901,90 @@ def test_preflight_refuses_wrong_commit_branch_or_version(tmp_path):
     finally: os.chdir(previous)
 
 
-def test_draft_orchestration_never_replaces_assets(tmp_path):
+@pytest.mark.parametrize('mode,error_message', [
+    ('fresh', None), ('reuse-empty', None),
+    ('reused', 'delete the draft and rerun'),
+    ('wrong-commit', 'existing release is published or targets another commit'),
+    ('published', 'existing release is published or targets another commit'),
+    ('tag-exists', 'remote tag already exists'), ('invalid-commit', 'invalid commit'),
+    ('race', 'tag exists or release is not the expected draft'),
+    ('download-tampered', 'draft asset size or sha256 mismatch'),
+    ('download-truncated', 'downloaded asset size mismatch'),
+    ('missing-checksum', 'draft asset set mismatch'),
+])
+def test_draft_orchestration_never_replaces_assets(tmp_path, monkeypatch, mode, error_message):
     import copy
-    fn = runpy.run_path(str(ROOT / 'packaging/draft_release.py'))['create_or_reuse_draft']
-    digest = hashlib.sha256(b'abc').hexdigest(); expected = {'asset.exe': {'size': 3, 'sha256': digest}}
-    for mode in ('reused', 'fresh', 'race'):
-        case = tmp_path / mode; (case / 'dist').mkdir(parents=True); calls = []
-        state = dict(id=1, tag_name='v1.0.0', draft=True, target_commitish='a' * 40, html_url='https://example.invalid/draft', assets=[])
-        exists = mode == 'reused'
-        if exists: state['assets'] = [dict(id=7, name='asset.exe', size=3)]
-        def fake_api(endpoint):
-            if '/git/matching-refs/' in endpoint: return []
-            assert endpoint.endswith('/releases/1'); return copy.deepcopy(state)
-        def fake_command(*args):
-            nonlocal exists
-            calls.append(args)
-            if args[1:3] == ('release', 'create'): exists = True; return b''
-            if args[1:3] == ('release', 'upload'):
-                state['assets'] = [dict(id=7, name='asset.exe', size=3)]
-                if mode == 'race': state['draft'] = False
-                return b''
-            if '/releases/assets/' in args[2]: return b'abc'
-            assert args[1] == 'api' and '--paginate' in args
-            return json.dumps([[copy.deepcopy(state)] if exists else []]).encode()
-        previous = Path.cwd(); error = None
-        try:
-            os.chdir(case)
-            with patch.dict(fn.__globals__, checksums=lambda *a: expected, command=fake_command, api=fake_api), \
-                    patch.dict(os.environ, GITHUB_REPOSITORY='owner/repo', GITHUB_SHA='a' * 40, GITHUB_STEP_SUMMARY=str(case / 'summary')):
-                try: fn(case)
-                except ValueError as exc: error = exc
-        finally: os.chdir(previous)
-        uploads = [call for call in calls if call[1:3] == ('release', 'upload')]
-        assert all(not set(call).intersection(('--clobber', 'edit', 'delete', '--latest'))
-                   and not any('draft=false' in argument for argument in call) for call in calls)
-        if mode == 'reused': assert error and 'delete the draft and rerun' in str(error) and not uploads
-        elif mode == 'fresh': assert error is None and len(uploads) == 1 and (case / 'dist/release-receipt.json').is_file()
-        else: assert error and 'draft' in str(error) and len(uploads) == 1
+    module = runpy.run_path(str(ROOT / 'packaging/draft_release.py'))
+    fn = module['create_or_reuse_draft']; names = module['NAMES']
+    inputs = tmp_path / 'artifacts'; inputs.mkdir(); (tmp_path / 'dist').mkdir()
+    outputs = release_checksum_inputs(inputs, names)
+    contents = {name: (inputs / name).read_bytes() for name in names}
+    contents.update({name + '.sha256': f'{hashlib.sha256(contents[name]).hexdigest()}  {name}\n'.encode('utf-8')
+                     for name in names})
+    expected = {name: {'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+                for name, data in contents.items()}
+    assert len(expected) == 8
+    calls = []; downloads = []
+    state = dict(id=1, tag_name='v1.0.0', draft=True, target_commitish='a' * 40,
+                 html_url='https://example.invalid/draft', assets=[])
+    exists = mode in ('reuse-empty', 'reused', 'wrong-commit', 'published')
+    if mode == 'reused': state['assets'] = [dict(id=7, name=sorted(names)[0], size=1)]
+    if mode == 'wrong-commit': state['target_commitish'] = 'b' * 40
+    if mode == 'published': state['draft'] = False
+    checksum_name = sorted(name + '.sha256' for name in names)[0]
+
+    def fake_api(endpoint):
+        if '/git/matching-refs/' in endpoint:
+            return [{'ref': 'refs/tags/v1.0.0'}] if mode == 'tag-exists' else []
+        assert endpoint.endswith('/releases/1'); return copy.deepcopy(state)
+
+    def fake_command(*args):
+        nonlocal exists
+        calls.append(args)
+        if args[1:3] == ('release', 'create'):
+            assert '--draft' in args and args[args.index('--target') + 1] == 'a' * 40
+            exists = True; return b''
+        if args[1:3] == ('release', 'upload'):
+            assert args[3] == 'v1.0.0'
+            assert args[4:] == tuple(str(inputs / name) for name in sorted(expected))
+            assert {Path(path).name for path in args[4:]} == names | {name + '.sha256' for name in names}
+            assert all(Path(path).read_bytes() == contents[Path(path).name] for path in args[4:])
+            state['assets'] = [dict(id=index, name=name, size=len(contents[name]))
+                               for index, name in enumerate(sorted(expected), 1)]
+            if mode == 'missing-checksum':
+                state['assets'] = [asset for asset in state['assets'] if asset['name'] != checksum_name]
+            if mode == 'race': state['draft'] = False
+            return b''
+        if '/releases/assets/' in args[2]:
+            asset = next(asset for asset in state['assets'] if str(asset['id']) == args[2].rsplit('/', 1)[1])
+            name = asset['name']; downloads.append(name); data = contents[name]
+            if name == checksum_name and mode == 'download-tampered': return b'!' + data[1:]
+            if name == checksum_name and mode == 'download-truncated': return data[:-1]
+            return data
+        assert args[1] == 'api' and '--paginate' in args
+        return json.dumps([[copy.deepcopy(state)] if exists else []]).encode()
+
+    monkeypatch.chdir(tmp_path)
+    with patch.dict(fn.__globals__, command=fake_command, api=fake_api), \
+            patch.dict(os.environ, GITHUB_REPOSITORY='owner/repo',
+                       GITHUB_SHA='invalid' if mode == 'invalid-commit' else 'a' * 40,
+                       WINDOWS_SHA256=outputs['windows'], LINUX_SHA256=outputs['linux'],
+                       GITHUB_STEP_SUMMARY=str(tmp_path / 'summary')):
+        if error_message:
+            with pytest.raises(ValueError, match=error_message): fn(inputs)
+        else: fn(inputs)
+    uploads = [call for call in calls if call[1:3] == ('release', 'upload')]
+    assert all(not set(call).intersection(('--clobber', 'edit', 'delete', '--latest'))
+               and not any('draft=false' in argument for argument in call) for call in calls)
+    receipt_path = tmp_path / 'dist/release-receipt.json'
+    if error_message is None:
+        assert len(uploads) == 1 and set(downloads) == set(expected) and len(downloads) == 8
+        receipt = json.loads(receipt_path.read_text())
+        assert receipt == {'url': state['html_url'], 'commit': 'a' * 40, 'assets': expected}
+        assert json.dumps(receipt, indent=2) in (tmp_path / 'summary').read_text()
+    else:
+        assert not receipt_path.exists()
+        assert len(uploads) == (1 if mode in ('race', 'download-tampered', 'download-truncated', 'missing-checksum') else 0)
 
 
 def synthetic_carchive(value='safe', forbidden=False, module='covearchive.fixture'):

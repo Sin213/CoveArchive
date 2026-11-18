@@ -41,6 +41,7 @@ def api(endpoint):
 def checksums(directory, outputs):
     directory = Path(directory)
     files = {p.name: p for p in directory.iterdir() if p.is_file()}
+    # Generated checksums are outputs only; reruns require a fresh input directory.
     if set(files) != NAMES | {"windows.sha256", "linux.sha256"}:
         raise ValueError("unexpected artifact input set")
     recorded = {}
@@ -58,10 +59,13 @@ def checksums(directory, outputs):
     for name, digest in recorded.items():
         if hashlib.sha256(files[name].read_bytes()).hexdigest() != digest:
             raise ValueError("artifact checksum mismatch")
-    sums = directory / "SHA256SUMS.txt"
-    sums.write_text("".join(f"{recorded[n]}  {n}\n" for n in sorted(NAMES)), encoding="utf-8")
+    sums = []
+    for name in sorted(NAMES):
+        checksum = directory / (name + ".sha256")
+        checksum.write_bytes(f"{recorded[name]}  {name}\n".encode("utf-8"))
+        sums.append(checksum)
     return {p.name: {"size": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
-            for p in [*(files[n] for n in sorted(NAMES)), sums]}
+            for p in [*(files[n] for n in sorted(NAMES)), *sums]}
 
 
 def create_or_reuse_draft(directory):

@@ -16,7 +16,9 @@ CoveArchive preserves public project release assets in a local archive:
 - `CoveArchive-1.0.0-Portable.exe`: Windows x86_64 single executable.
 - `CoveArchive-1.0.0-x86_64.AppImage`: Linux x86_64 AppImage.
 - `covearchive_1.0.0_amd64.deb`: Linux amd64 Debian package.
-- `SHA256SUMS.txt`: artifact checksums, not a code-signing signature.
+- Each artifact has a matching `<artifact>.sha256` file; verify it with
+  `sha256sum -c <artifact>.sha256` beside the downloaded artifact. Checksums are
+  not a code-signing signature.
 
 Windows requires 64-bit Windows 10 or newer, a desktop session and a local NTFS archive destination.
 Linux requires glibc >= 2.35, a Wayland or X11 desktop and system desktop libraries
