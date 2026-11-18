@@ -501,6 +501,17 @@ def test_F4_invalid_edit_cannot_save_previous_valid_rules(ui):
     assert v.preferences.load()[0]["repositories"]["owner/repo"]["include"]==["*.zip"]
 
 
+def test_F4b_rule_feedback_tone_matches_outcome(ui):
+    v,c = ui
+    succeed(v,c,release())
+    v.include.setText("bad/path")
+    assert v.rule_error.text() and v.rule_error.property("tone")=="error"
+    v.include.setText("*.zip"); v.save_rules.click()
+    assert v.rule_error.text()=="Rules saved" and v.rule_error.property("tone")=="success"
+    v.include.setText("bad/path")
+    assert v.rule_error.text()!="Rules saved" and v.rule_error.property("tone")=="error"
+
+
 def test_gitlab_browse_status_rules_and_nested_destination(ui):
     from test_gitlab import Wire, TARGET
     from covearchive.archive.naming import release_folder_name

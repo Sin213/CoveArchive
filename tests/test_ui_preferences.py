@@ -121,7 +121,7 @@ def test_external_changes_preserved(ui,kind):
     if kind!="appeared":
         v.save_rules.click()
         v.save_rules.click()
-        assert v.rule_error.text()=="Rules saved"
+        assert v.rule_error.text()=="Rules saved" and v.rule_error.property("tone")=="success"
         v.preferences = PreferenceStore(v.preferences.path)
         assert v.preferences.save(v.settings) is None
     external = v.preferences.load()[0]
@@ -131,6 +131,7 @@ def test_external_changes_preserved(ui,kind):
     v.preferences.path.write_bytes(data)
     v.save_rules.click()
     assert "changed on disk" in v.rule_error.text() and not v.preferences.writable
+    assert v.rule_error.property("tone")=="error"
     assert v.preferences.path.read_bytes()==data and v.preferences.save(v.settings)
     assert v.preferences.path.read_bytes()==data
 

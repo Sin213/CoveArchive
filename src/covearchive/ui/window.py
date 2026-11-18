@@ -576,9 +576,12 @@ class MainWindow(QMainWindow):
         browse_panes.sync(self)
         browse_panes.center_state(self,'result_empty' if not count else 'results',text)
 
+    def _rule_message(self, text, error=True):
+        self.rule_error.setText(text); set_tone(self.rule_error, "error" if error else "success")
+
     def _rules_changed(self):
         try: rules=BuildRules(parse_patterns(self.include.text()),parse_patterns(self.exclude.text()))
-        except BuildFilterError as error: self.rule_error.setText(str(error)); return
+        except BuildFilterError as error: self._rule_message(str(error)); return
         self.rules=rules; self.rule_error.clear(); self._refresh()
 
     def _select(self,clear):
@@ -600,17 +603,18 @@ class MainWindow(QMainWindow):
 
     def _save_rules(self):
         if not self.show_catalog or self.catalog is None:
-            self.rule_error.setText("Scan a repository before saving rules")
+            self._rule_message("Scan a repository before saving rules")
             return
         if self.catalog.repository.provider!='github':
-            self.rule_error.setText('Saving rules is available for GitHub repositories only.'); return
+            self._rule_message('Saving rules is available for GitHub repositories only.'); return
         try:
             self.rules=BuildRules(parse_patterns(self.include.text()),parse_patterns(self.exclude.text()))
         except BuildFilterError as error:
-            self.rule_error.setText(str(error))
+            self._rule_message(str(error))
             return
         self.settings["repositories"][self.catalog.repository.repo_key]=dict(include=list(self.rules.include),exclude=list(self.rules.exclude),extensions=[e for e,b in self.formats.items() if b.isChecked()],prereleases=self.prereleases.isChecked())
-        self.rule_error.setText(self.preferences.save(self.settings) or "Rules saved")
+        problem=self.preferences.save(self.settings)
+        self._rule_message(problem or "Rules saved",bool(problem))
 
     def _browse(self):
         path=QFileDialog.getExistingDirectory(self,"Choose archive root",self.root.text())
@@ -637,7 +641,7 @@ class MainWindow(QMainWindow):
         request=EnqueueRequest(self.enqueue_token,self.catalog.repository,root,items)
         if not self.bridge.enqueue(request): self.enqueue_pending=False; self._selection_changed(); self._status("Queue unavailable; selection was not submitted",True); return
         self.settings["archive_root"]=root
-        if self.preferences.writable: self.rule_error.setText(self.preferences.save(self.settings) or "")
+        if self.preferences.writable: self._rule_message(self.preferences.save(self.settings) or "")
 
     def _enqueued(self,result):
         if self._window_closed or self.bridge.shutting_down or result.token!=self.enqueue_token: return
