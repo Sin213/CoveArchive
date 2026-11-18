@@ -1,18 +1,12 @@
 # CoveArchive
 
-**v1.0.0 (upcoming)** - local preservation of public project releases.
-
 CoveArchive is a desktop application for keeping release assets in a local
 archive you control. Releases can disappear, assets can be replaced, and an
 upstream project can change its distribution plans. CoveArchive saves selected
 files, records their metadata and SHA-256 hashes, and keeps previously archived
 files when the upstream listing changes.
 
-CoveArchive is part of the Cove Nexus family of tools. It is a standalone
-application; Cove Nexus is not required.
-
-This upcoming version runs from source on Windows and Linux. Installers and
-release binaries are not available yet.
+https://github.com/user-attachments/assets/aee5c282-d490-48db-b8b5-348807012f0d
 
 ## Supported sources
 
@@ -334,25 +328,6 @@ atomic replacement or protection against concurrent external modification.
 - No background operation while the window is closed and no byte-level resume.
 - Git bundles omit LFS file contents, submodule contents and PR/MR refs.
 - Windows and Linux source use is covered here; macOS support is not claimed.
-
-## Screenshots
-
-No approved, sanitized screenshots are available yet. Screenshots will be added
-once approved captures are available.
-
-## Development and testing
-
-From the repository root, with the intended Python environment active:
-
-```sh
-python -m pip install -e ".[test]"
-python -m pytest
-```
-
-The tests use offline fixtures and local resources. Platform-specific filesystem
-tests run only on their target platform, and Git-history tests require Git.
-The `--smoke-test` launcher option is a developer diagnostic that briefly opens
-and closes the application.
 
 ## License
 
