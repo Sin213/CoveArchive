@@ -232,7 +232,10 @@ def install(window):
     for chip in w.filter_chips:
         chip.setTextFormat(Qt.PlainText); chip.setProperty('chip',True)
         chip.setSizePolicy(QSizePolicy.Maximum,QSizePolicy.Fixed); header.addWidget(chip)
-    header.addStretch(); header.addWidget(w.preview); header.addWidget(w.save_rules)
+    # The elided preview owns the free space (its policy ignores size hints) and keeps it while hidden.
+    policy=w.preview.sizePolicy(); policy.setRetainSizeWhenHidden(True); w.preview.setSizePolicy(policy)
+    w.preview.setAlignment(Qt.AlignRight|Qt.AlignVCenter)
+    header.addWidget(w.preview,1); header.addWidget(w.save_rules)
     filters.addWidget(w.rule_error)
     w.filter_body=QWidget(); grid=QGridLayout(w.filter_body); grid.setContentsMargins(4,2,4,2)
     for index,(extension,box) in enumerate(w.formats.items()):

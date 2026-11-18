@@ -16,6 +16,18 @@ def test_filter_strip_and_collapsed_errors(ui):
     assert w.rule_error.text()
 
 
+def test_filter_strip_match_preview_is_readable(ui):
+    w,c=ui
+    for _ in range(5): APP.processEvents()
+    assert w.preview.isHidden() and w.save_rules.width()==w.save_rules.sizeHint().width()
+    succeed(w,c,release(assets=[asset(1,'app-linux.zip'),asset(2,'app-windows.zip')]))
+    w.include.setText('*linux*')
+    for _ in range(5): APP.processEvents()
+    assert w.preview.text()=='Rules match 1 of 2 eligible assets' and w.preview.isVisible()
+    assert w.preview.width()>=w.preview.fontMetrics().horizontalAdvance(w.preview.text())
+    assert w.save_rules.width()==w.save_rules.sizeHint().width()
+
+
 def test_release_focus_and_spanned_groups(ui):
     w,c=ui
     succeed(w,c,release(),release(id=2,tag_name='v2',assets=[asset(2)]))
