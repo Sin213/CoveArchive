@@ -15,6 +15,7 @@ import subprocess
 import struct
 import tarfile
 import sys
+import time
 from unittest.mock import patch
 import zipfile
 
@@ -446,7 +447,6 @@ def test_windows_inno_rejects_invalid_pin_before_probe(tmp_path, pin):
     result = run_powershell('''
 $ErrorActionPreference = 'Stop'
 . $env:INNO_TEST_HELPER
-function Start-Process { throw 'Invalid pin must not reach the compiler' }
 try { Assert-InnoVersion 'unused-iscc' $env:INNO_TEST_PIN $env:INNO_TEST_SCRATCH }
 catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
 ''', env)
@@ -550,18 +550,20 @@ def test_windows_inno_probe_rejects_missing_or_non_integer_exit_code(tmp_path, e
     env = os.environ.copy()
     env.update(INNO_TEST_HELPER=str(ROOT / 'packaging/windows_inno_version.ps1'),
                INNO_TEST_SCRATCH=str(tmp_path / 'scratch'), INNO_TEST_EXIT_CODE=exit_code,
-               INNO_TEST_ENGINE=INNO_ENGINE + '6.7.1')
+               INNO_TEST_ENGINE=INNO_ENGINE + '6.7.1', INNO_TEST_DISPOSED=str(tmp_path / 'disposed'))
     result = run_powershell('''
 $ErrorActionPreference = 'Stop'
-. $env:INNO_TEST_HELPER
-function Start-Process {
-    param($RedirectStandardOutput, $RedirectStandardError)
-    [IO.File]::WriteAllText($RedirectStandardOutput, $env:INNO_TEST_ENGINE)
-    [IO.File]::WriteAllText($RedirectStandardError, '')
-    $process = [pscustomobject]@{ Handle = 1; ExitCode = (Invoke-Expression $env:INNO_TEST_EXIT_CODE) }
-    $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {}
-    return $process
+$fakeProcess = [pscustomobject]@{
+    StandardOutput = (New-Object IO.StringReader($env:INNO_TEST_ENGINE))
+    StandardError = (New-Object IO.StringReader(''))
+    ExitCode = (Invoke-Expression $env:INNO_TEST_EXIT_CODE)
 }
+$fakeProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds) return $true }
+$fakeProcess | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
+    [IO.File]::WriteAllText($env:INNO_TEST_DISPOSED, 'disposed')
+}
+$helper = [IO.File]::ReadAllText($env:INNO_TEST_HELPER).Replace('[System.Diagnostics.Process]::Start($startInfo)', '$fakeProcess')
+. ([scriptblock]::Create($helper))
 try { Assert-InnoVersion 'stub' '6.7.1' $env:INNO_TEST_SCRATCH }
 catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
 ''', env)
@@ -569,6 +571,77 @@ catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     assert 'Inno compiler probe returned a null or non-integer exit code' in result.stderr
     assert 'pinned=<6.7.1>' in result.stderr
     assert 'stdout=<' + INNO_ENGINE + '6.7.1>' in result.stderr
+    assert (tmp_path / 'disposed').read_text() == 'disposed'
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='requires Windows batch compiler stub execution')
+def test_windows_inno_probe_fast_child_stress(tmp_path):
+    compiler = tmp_path / 'fast compiler.cmd'
+    compiler.write_text('@echo off\necho ' + INNO_ENGINE + '6.7.1\nexit /b 0\n', encoding='ascii')
+    scratch = tmp_path / 'scratch with spaces'
+    env = os.environ.copy()
+    env.update(INNO_TEST_HELPER=str(ROOT / 'packaging/windows_inno_version.ps1'),
+               INNO_TEST_COMPILER=str(compiler), INNO_TEST_SCRATCH=str(scratch))
+    result = run_powershell('''
+$ErrorActionPreference = 'Stop'
+. $env:INNO_TEST_HELPER
+try {
+    for ($i = 0; $i -lt 200; $i++) {
+        Assert-InnoVersion $env:INNO_TEST_COMPILER '6.7.1' $env:INNO_TEST_SCRATCH
+    }
+    'accepted 200'
+}
+catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+''', env, timeout=60)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout.strip() == 'accepted 200'
+    assert len(list(scratch.glob('inno-probe-*'))) == 200
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='requires Windows batch compiler stub execution')
+def test_windows_inno_probe_hung_compiler_times_out(tmp_path):
+    compiler = tmp_path / 'hung compiler.cmd'
+    receipt = tmp_path / 'started'
+    compiler.write_text('@echo off\n> "%INNO_TEST_RECEIPT%" echo started\necho ' + INNO_ENGINE + '6.7.1\n'
+                        + 'echo ' + 'A' * 2100 + '\necho ' + 'B' * 2100 + ' 1>&2\n'
+                        + 'ping -n 31 127.0.0.1 >nul 2>&1\nexit /b 0\n', encoding='ascii')
+    env = os.environ.copy()
+    env.update(INNO_TEST_HELPER=str(ROOT / 'packaging/windows_inno_version.ps1'),
+               INNO_TEST_COMPILER=str(compiler), INNO_TEST_SCRATCH=str(tmp_path / 'scratch'),
+               INNO_TEST_RECEIPT=str(receipt))
+    start = time.monotonic()
+    result = run_powershell('''
+$ErrorActionPreference = 'Stop'
+. $env:INNO_TEST_HELPER
+try { Assert-InnoVersion $env:INNO_TEST_COMPILER '6.7.1' $env:INNO_TEST_SCRATCH -TimeoutMilliseconds 1000 }
+catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+''', env, timeout=15)
+    assert time.monotonic() - start < 12
+    assert result.returncode != 0 and receipt.exists(), (result.stdout, result.stderr)
+    assert 'Inno compiler probe timed out after 1000 ms; pinned=<6.7.1>; exit code=<timed out>' in result.stderr
+    assert 'stdout=<' + INNO_ENGINE + '6.7.1' in result.stderr
+    assert 'stderr=<' + 'B' * 2000 + '>' in result.stderr
+    assert 'A' * 2001 not in result.stderr and 'B' * 2001 not in result.stderr
+
+
+def test_windows_inno_probe_uses_bounded_direct_process():
+    helper = (ROOT / 'packaging/windows_inno_version.ps1').read_text()
+    assert 'Start-Process' not in helper
+    assert 'New-Object System.Diagnostics.ProcessStartInfo' in helper
+    for setting in ('FileName = $Compiler', 'Arguments = "`"$probe`""', 'UseShellExecute = $false',
+                    'CreateNoWindow = $true', 'RedirectStandardOutput = $true', 'RedirectStandardError = $true'):
+        assert '$startInfo.' + setting in helper
+    start = helper.index('$process = [System.Diagnostics.Process]::Start($startInfo)')
+    stdout = helper.index('$stdoutTask = $process.StandardOutput.ReadToEndAsync()')
+    stderr = helper.index('$stderrTask = $process.StandardError.ReadToEndAsync()')
+    wait = helper.index('if (!$process.WaitForExit($TimeoutMilliseconds))')
+    assert start < stdout < wait and start < stderr < wait
+    assert '[int]$TimeoutMilliseconds = 120000' in helper
+    assert '[ValidateRange(1, 2147483647)]' in helper
+    assert wait < helper.index('$stdout = $stdoutTask.Result') < helper.index('$exitCode = $process.ExitCode')
+    assert wait < helper.index('$stderr = $stderrTask.Result') < helper.index('$exitCode = $process.ExitCode')
+    assert "if ($exitCode -isnot [int]) { throw 'Inno compiler probe returned a null or non-integer exit code' }" in helper
+    assert '$process.Kill($true)' in helper and '$process.Dispose()' in helper
 
 
 def test_windows_process_exit_codes_require_cached_handle_and_wait():
@@ -584,7 +657,7 @@ def test_windows_process_exit_codes_require_cached_handle_and_wait():
             assert wait is not None, (path, start[1])
             assert re.search(rf'{process}\.ExitCode\b', following[wait.end():]), path
             count += 1
-    assert count == 4
+    assert count == 3
 
 
 def test_windows_ci_enforces_inno_version():

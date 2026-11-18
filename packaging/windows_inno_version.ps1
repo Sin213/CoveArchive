@@ -7,10 +7,11 @@ function Get-InnoEngineVersion([string]$Output) {
     return $versions[0].Groups[1].Value
 }
 
-function Assert-InnoVersion([string]$Compiler, [string]$PinnedVersion, [string]$ScratchDirectory) {
+function Assert-InnoVersion([string]$Compiler, [string]$PinnedVersion, [string]$ScratchDirectory,
+                            [ValidateRange(1, 2147483647)][int]$TimeoutMilliseconds = 120000) {
     $exitCode = 'not started'
     $stdout = ''; $stderr = ''
-    $stdoutPath = $null; $stderrPath = $null
+    $process = $null; $stdoutTask = $null; $stderrTask = $null
     try {
         $triple = '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
         if (![regex]::IsMatch($PinnedVersion, "\A$triple\z")) {
@@ -28,15 +29,31 @@ AppVersion=0.0.0
 DefaultDirName={autopf}\CoveArchiveInnoProbe
 Output=no
 '@ | Set-Content -LiteralPath $probe -Encoding ASCII -ErrorAction Stop
-        $stdoutPath = Join-Path $probeDir 'stdout.txt'
-        $stderrPath = Join-Path $probeDir 'stderr.txt'
-        $process = Start-Process -FilePath $Compiler -ArgumentList "`"$probe`"" -PassThru -NoNewWindow -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -ErrorAction Stop
-        $null = $process.Handle
-        $process.WaitForExit()
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $Compiler
+        $startInfo.Arguments = "`"$probe`""
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $process = [System.Diagnostics.Process]::Start($startInfo)
+        # Drain both pipes before waiting so a full pipe cannot stall the compiler.
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (!$process.WaitForExit($TimeoutMilliseconds)) {
+            $exitCode = 'timed out'
+            try { $process.Kill($true) } catch {
+                # Windows PowerShell 5.1's .NET Framework lacks Kill(entireProcessTree).
+                try { & "$env:SystemRoot\System32\taskkill.exe" /PID $process.Id /T /F 2>$null | Out-Null } catch {}
+                try { $process.Kill() } catch {}
+            }
+            $null = $process.WaitForExit(1000)
+            throw "Inno compiler probe timed out after $TimeoutMilliseconds ms"
+        }
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
         $exitCode = $process.ExitCode
         if ($exitCode -isnot [int]) { throw 'Inno compiler probe returned a null or non-integer exit code' }
-        $stdout = [IO.File]::ReadAllText($stdoutPath)
-        $stderr = [IO.File]::ReadAllText($stderrPath)
         if ($exitCode -ne 0) { throw 'Inno compiler probe failed' }
         $actualParts = (Get-InnoEngineVersion $stdout).Split('.')
         $pinnedParts = $PinnedVersion.Split('.')
@@ -47,15 +64,17 @@ Output=no
         }
     } catch {
         $reason = $_.Exception.Message
-        # Include any partial output even when starting or reading the probe fails.
-        if ($stdoutPath -and (Test-Path -LiteralPath $stdoutPath)) {
-            try { $stdout = [IO.File]::ReadAllText($stdoutPath) } catch {}
+        # Bound draining after a failed/timed-out probe, including inherited pipes.
+        if ($null -ne $stdoutTask) {
+            try { if ($stdoutTask.Wait(1000)) { $stdout = $stdoutTask.Result } } catch {}
         }
-        if ($stderrPath -and (Test-Path -LiteralPath $stderrPath)) {
-            try { $stderr = [IO.File]::ReadAllText($stderrPath) } catch {}
+        if ($null -ne $stderrTask) {
+            try { if ($stderrTask.Wait(1000)) { $stderr = $stderrTask.Result } } catch {}
         }
         $stdout = $stdout.Substring(0, [Math]::Min(2000, $stdout.Length))
         $stderr = $stderr.Substring(0, [Math]::Min(2000, $stderr.Length))
         throw "$reason; pinned=<$PinnedVersion>; exit code=<$exitCode>; stdout=<$stdout>; stderr=<$stderr>"
+    } finally {
+        if ($null -ne $process) { $process.Dispose() }
     }
 }
