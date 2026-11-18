@@ -62,7 +62,7 @@ def ui():
     controller = FakeController(); window = isolated_window(ROOT/"run_covearchive.py", controller)
     window.show(); APP.processEvents()
     yield window, controller
-    window.close(); until(lambda:window.bridge.closed); APP.processEvents()
+    window.close(); until(lambda:window.bridge.closed,10); APP.processEvents()
 
 
 def succeed(window, controller, *items):
@@ -228,7 +228,7 @@ def test_UI_24_real_close_kills():
     try:
         until(lambda:c.job.process.processId()>0); pid=c.job.process.processId()
         v.close(); until(lambda:v.bridge.closed); assert gone(pid) and c.job is None
-    finally: c.shutdown(1000); v.close(); until(lambda:v.bridge.closed)
+    finally: c.shutdown(1000); v.close(); until(lambda:v.bridge.closed,10)
 
 
 @pytest.mark.parametrize("raw", [URL+"?q="+"\u00e9"*700,"   "+URL+" "*3000],ids=["query","padding"])
@@ -374,7 +374,7 @@ def test_R7_UI_06_real_process_success():
         m=v.tree.model(); assert m.rowCount()==1
         assert m.data(m.index(0,0))=="Release 1"
         assert m.data(m.index(0,0,m.index(0,0)))=="app.zip"
-    finally: c.shutdown(1000); v.close(); until(lambda:v.bridge.closed)
+    finally: c.shutdown(1000); v.close(); until(lambda:v.bridge.closed,10)
 
 
 def test_C4_identity_rules_tristate_and_no_scan(ui):

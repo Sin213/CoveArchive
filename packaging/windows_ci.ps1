@@ -13,7 +13,10 @@ $compiler = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
 if (!(Test-Path -LiteralPath $compiler)) { throw 'Pinned Inno compiler missing' }
 . "$PSScriptRoot/windows_inno_version.ps1"
 Assert-InnoVersion $compiler $env:INNO_VERSION $scratch
+# Elevated hosted runner + Chocolatey shim: real-engine tests are verified locally.
+$env:COVEARCHIVE_SKIP_REAL_ARIA2_TESTS = '1'
 python -m pytest
+Remove-Item Env:COVEARCHIVE_SKIP_REAL_ARIA2_TESTS
 Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
 $version = python -c 'import runpy;print(runpy.run_path("src/covearchive/__init__.py")["__version__"])'
 function Test-BinaryVersion([string]$Executable) {

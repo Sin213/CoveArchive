@@ -43,7 +43,14 @@ def process_gone(process):
     assert process.poll() is not None
 
 @pytest.fixture
-def executable():
+def real_aria2_tests():
+    if os.environ.get("COVEARCHIVE_SKIP_REAL_ARIA2_TESTS") == "1":
+        pytest.skip("NOT VERIFIED: COVEARCHIVE_SKIP_REAL_ARIA2_TESTS=1: elevated hosted runner "
+                    "and Chocolatey shim cannot verify the real engine/private ACLs; "
+                    "verified locally with real aria2 1.37.0")
+
+@pytest.fixture
+def executable(real_aria2_tests):
     override = os.environ.get("COVEARCHIVE_TEST_ARIA2")
     path = Path(override) if override else a.find_aria2()
     if override: assert path.is_absolute()
@@ -133,7 +140,7 @@ def test_E08_exit_during_start_cleanup(engine, monkeypatch):
     assert all(not path.exists() for path in directories)
 
 @pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
-def test_security_acl_rejects_everyone(tmp_path):
+def test_security_acl_rejects_everyone(tmp_path, real_aria2_tests):
     private = tmp_path / "private"; sid = a.current_user_sid()
     a.create_private_dir(private, sid)
     assert a.verify_private_acl(private, sid)
@@ -748,7 +755,8 @@ def test_repair3_T17_engine_TOCTOU_options(engine, http_fixture, monkeypatch):
 
 @pytest.mark.parametrize("failure", ["terminate","wait"])
 @pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
-def test_repair3_retained_process_blocks_restart(engine, monkeypatch, failure):
+def test_repair3_retained_process_blocks_restart(tmp_path, monkeypatch, failure):
+    engine = a.Aria2Engine(tmp_path, executable="C:/missing.exe")
     class Retained:
         def poll(self): return None
         def terminate(self):
@@ -766,7 +774,9 @@ def test_repair3_retained_process_blocks_restart(engine, monkeypatch, failure):
 
 @pytest.mark.parametrize("fault", ["acl","work_directory","cleanup","state","deadline"])
 @pytest.mark.skipif(sys.platform != "win32", reason="real aria2 backend requires Win32 job objects, ACLs and listener ownership")
-def test_repair3_lifecycle_faults(engine, monkeypatch, fault):
+def test_repair3_lifecycle_faults(request, tmp_path, monkeypatch, fault):
+    engine = (a.Aria2Engine(tmp_path, executable="C:/missing.exe") if fault == "work_directory"
+              else request.getfixturevalue("engine"))
     if fault == "acl":
         created, secure = [], a.create_private_dir
         def record(path,sid): created.append(path); return secure(path,sid)

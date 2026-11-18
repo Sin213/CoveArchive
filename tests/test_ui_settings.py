@@ -139,7 +139,9 @@ def test_settings_geometry_with_wide_fonts():
                 assert w.settings_dialog.font().pointSize()==size and w.settings_dialog.font().stretch()==125
                 assert_settings_geometry(w.settings_dialog)
             finally:
-                w.close(); until(lambda:w.bridge.closed); APP.processEvents()
+                if w.settings_dialog is not None:
+                    w.settings_dialog.reject(); APP.processEvents()
+                w.close(); until(lambda:w.bridge.closed,10); APP.processEvents()
     finally:
         APP.setFont(original); APP.processEvents()
 
@@ -165,7 +167,7 @@ def test_m1_fresh_persisted_appearance(tmp_path,monkeypatch,appearance):
     monkeypatch.setattr(APP.styleHints(),'colorScheme',lambda:Qt.ColorScheme.Light if appearance=='dark' else Qt.ColorScheme.Dark)
     w=isolated_window(ROOT/'run_covearchive.py',FakeController())
     try: assert w.property('themeName')==appearance and not w.controller.calls
-    finally: w.close(); until(lambda:w.bridge.closed); APP.processEvents()
+    finally: w.close(); until(lambda:w.bridge.closed,10); APP.processEvents()
 
 
 def test_m1_failed_settings_save(ui,tmp_path,monkeypatch):
@@ -245,7 +247,7 @@ def test_default_auth_is_session_only_and_wired(ui,monkeypatch):
         assert other.auth.status().label=='Session only'
         assert other.bridge._options['auth'] is other.auth
     finally:
-        other.close(); until(lambda:other.bridge.closed)
+        other.close(); until(lambda:other.bridge.closed,10)
 
 
 @pytest.mark.parametrize('key', [Qt.Key_Return,Qt.Key_Enter])

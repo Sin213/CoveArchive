@@ -1,5 +1,6 @@
 """Offline package diagnostics and release packaging checks."""
 
+import ast
 import importlib
 import hashlib
 import io
@@ -360,6 +361,34 @@ def test_windows_ci_installation_oracles():
     assert "[Environment]::GetFolderPath('LocalApplicationData')" in script
     assert "$sentinelDir = Join-Path $dataRoot ('packaging-' + [Guid]::NewGuid().ToString('N'))" in script
     assert 'finally {' in script and 'Remove-Item -LiteralPath $sentinelDir' in script
+
+
+def test_windows_ci_real_aria2_gate():
+    gate = 'COVEARCHIVE_SKIP_REAL_ARIA2_TESTS'
+    windows = ROOT / 'packaging/windows_ci.ps1'
+    script = windows.read_text()
+    enabled = script.index("$env:" + gate + " = '1'")
+    pytest_line = script.index('python -m pytest')
+    removed = script.index('Remove-Item Env:' + gate)
+    assert script.index('Assert-InnoVersion $compiler') < enabled < pytest_line < removed
+    assert removed < script.index('$version = python') < script.index('python -m PyInstaller')
+    assert script.count(gate) == 2
+    for folder in ('.github', 'packaging'):
+        for path in (ROOT / folder).rglob('*'):
+            if path.is_file() and path != windows and '__pycache__' not in path.parts:
+                assert gate.encode() not in path.read_bytes(), path
+    tree = ast.parse((ROOT / 'tests/test_transfer_aria2.py').read_text())
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    fixture = functions['real_aria2_tests']
+    assert any(isinstance(node, ast.Attribute) and node.attr == 'fixture' for node in fixture.decorator_list)
+    guard = fixture.body[0]
+    assert isinstance(guard, ast.If)
+    assert ast.dump(guard.test) == ast.dump(ast.parse('os.environ.get(' + repr(gate) + ') == "1"', mode='eval').body)
+    skip = guard.body[0].value
+    assert ast.unparse(skip.func) == 'pytest.skip'
+    assert ast.literal_eval(skip.args[0]).startswith('NOT VERIFIED: ' + gate + '=1:')
+    for name in ('executable', 'test_security_acl_rejects_everyone'):
+        assert 'real_aria2_tests' in [arg.arg for arg in functions[name].args.args]
 
 
 def run_powershell(script, env=None):
