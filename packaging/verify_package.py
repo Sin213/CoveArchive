@@ -16,18 +16,19 @@ import zipfile
 import zlib
 
 FORBIDDEN = {"tests", ".git", ".env", "preferences.json", "library.json", "evidence"}
-SECRET = re.compile(rb"gh[pousr]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{30,}|"
+SECRET = re.compile(rb"(?-i:gh[pousr]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{30,})|"
                   rb"AKIA[A-Z0-9]{16}|-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
                   rb"[\r\n]+[A-Za-z0-9+/=\r\n]{40,}-----END (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----", re.I)
 
 
 def first_party(name):
     parts = PurePosixPath(name.lower()).parts
-    # Install directories and onedir wrappers do not establish package ownership.
+    # Install directories, onedir wrappers and extensionless launchers before
+    # their embedded PYZ do not establish package ownership.
     namespace = [p for i, p in enumerate(parts) if not (p == "covearchive" and (
         parts[max(0, i - 1):i] == ("opt",)
         or parts[max(0, i - 2):i] == ("usr", "lib")
-        or parts[i + 1:i + 2] == ("_internal",)))]
+        or parts[i + 1:i + 2] in (("_internal",), ("pyz.pyz",))))]
     return (any(p == "covearchive" or (p.startswith("covearchive.") and not p.endswith((".exe", ".zip", ".pyz")))
                 or p.startswith("run_covearchive") for p in namespace)
             or PurePosixPath(name.lower()).suffix in

@@ -272,6 +272,41 @@ def test_verifier_distinguishes_parser_markers_from_private_key_material(tmp_pat
     binary.unlink(); assert verify(root, 'windows') == []
 
 
+@pytest.mark.parametrize('prefix', ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_'])
+@pytest.mark.parametrize('name', ['upstream.so', 'notes.txt'])
+def test_verifier_github_tokens_remain_forbidden(tmp_path, prefix, name):
+    verify = runpy.run_path(str(ROOT / 'packaging/verify_package.py'))['verify']
+    root = package_fixture(tmp_path / 'tree')
+    # Mixed-case token bodies remain valid; only the prefix is case-sensitive.
+    token = prefix.encode() + b'aB9_' * 20
+    before, after = (b'\x7fELF\0before\0', b'\0after\xff') if name.endswith('.so') else (b'token: ', b'\n')
+    (root / name).write_bytes(before + token + after)
+    assert verify(root, 'windows') == ['forbidden secret: ' + name]
+
+
+def test_verifier_pyexpat_constants_are_not_github_tokens(tmp_path):
+    verify = runpy.run_path(str(ROOT / 'packaging/verify_package.py'))['verify']
+    root = package_fixture(tmp_path / 'tree')
+    constants = (b'\0XML_FEATURE_BILLION_LAUGHS_ATTACK_PROTECTION_ACTIVATION_THRESHOLD_DEFAULT\0'
+                 b'XML_FEATURE_BILLION_LAUGHS_ATTACK_PROTECTION_MAXIMUM_AMPLIFICATION_DEFAULT\0')
+    (root / 'pyexpat.so').write_bytes(constants)
+    assert verify(root, 'windows') == []
+
+
+@pytest.mark.parametrize('secret', [
+    b'AKIA' + b'A1' * 8, b'akia' + b'a1' * 8,
+    *[(b'-----BEGIN ' + kind + b'PRIVATE KEY-----\n' + b'M' * 64 +
+       b'\n-----END ' + kind + b'PRIVATE KEY-----')
+      for kind in (b'', b'RSA ', b'EC ', b'OPENSSH ', b'ENCRYPTED ')],
+    b'-----begin private key-----\n' + b'm' * 64 + b'\n-----end private key-----',
+])
+def test_verifier_aws_and_pem_detection_unchanged(tmp_path, secret):
+    verify = runpy.run_path(str(ROOT / 'packaging/verify_package.py'))['verify']
+    root = package_fixture(tmp_path / 'tree')
+    (root / 'upstream.so').write_bytes(b'\0' + secret + b'\0')
+    assert verify(root, 'windows') == ['forbidden secret: upstream.so']
+
+
 def test_build_lock_is_approved_and_every_requirement_has_hashes():
     data = (ROOT / "packaging/requirements-build.txt").read_bytes()
     # Git's existing eol=lf policy normalizes CRLF checkout bytes.
@@ -335,65 +370,156 @@ def run_powershell(script, env=None):
                           env=env, capture_output=True, text=True, timeout=20)
 
 
-@pytest.mark.parametrize('actual,pin,parts,accepted', [
-    ('6.7.1', '6.7.1', (6, 7, 1), True),
-    ('6.7.1.0', '6.7.1', (6, 7, 1), True),
-    (' \t6.7.1.0\r\n', '6.7.1', (6, 7, 1), True),
-    ('6.7.1.42', '6.7.1', (6, 7, 1), True),
-    ('7.7.1', '6.7.1', (7, 7, 1), False),
-    ('6.8.1', '6.7.1', (6, 8, 1), False),
-    ('6.7.2', '6.7.1', (6, 7, 2), False),
-    ('6.7.10', '6.7.1', (6, 7, 10), False),
-    ('6.7', '6.7.1', (6, 7, 1), False),
-    ('6.7.1.beta', '6.7.1', (6, 7, 1), False),
-    ('6.7.1-beta', '6.7.1', (6, 7, 1), False),
-    ('6.7.1 (a)', '6.7.1', (6, 7, 1), False),
-    ('06.7.1', '6.7.1', (6, 7, 1), False),
-    ('6.07.1', '6.7.1', (6, 7, 1), False),
-    ('6.7.01', '6.7.1', (6, 7, 1), False),
-    ('6.7.1.00', '6.7.1', (6, 7, 1), False),
-    ('', '6.7.1', (6, 7, 1), False),
-    (None, '6.7.1', (6, 7, 1), False),
-    ('6.7.1', '6.7', (6, 7, 1), False),
-    ('6.7.1', '6.7.1.0', (6, 7, 1), False),
-    ('6.7.1', '6.7.1-beta', (6, 7, 1), False),
-    ('6.7.1', '06.7.1', (6, 7, 1), False),
-    ('6.7.1', '6.7.1\n', (6, 7, 1), False),
-    ('6.7.1', '', (6, 7, 1), False),
-    ('6.7.1', '6.7.1', (7, 7, 1), False),
-    ('6.7.1', '6.7.1', (6, 8, 1), False),
-    ('6.7.1', '6.7.1', (6, 7, 2), False),
+INNO_BANNER = 'Inno Setup 6 Command-Line Compiler\nCopyright (C) 1997-2026 Jordan Russell\n'
+INNO_ENGINE = 'Compiler engine version: Inno Setup '
+
+
+@pytest.mark.parametrize('output,expected', [
+    (INNO_BANNER + INNO_ENGINE + '6.7.1\nCompiling script\n', '6.7.1'),
+    ((INNO_BANNER + INNO_ENGINE + '6.7.1\n').replace('\n', '\r\n'), '6.7.1'),
+    (INNO_ENGINE + '0.0.0', '0.0.0'),
+    *[(INNO_ENGINE + version, None) for version in
+      ('6.7', '6.7.1.0', '6.7.1-dev', '6.7.1.beta', '6.7.1 (a)',
+       '06.7.1', '6.07.1', '6.7.01', '6.7.1 ')],
+    (' ' + INNO_ENGINE + '6.7.1', None),
+    (INNO_ENGINE.lower() + '6.7.1', None),
+    (INNO_ENGINE + '6.7.1\n' + INNO_ENGINE + '6.7.1', None),
+    (INNO_ENGINE + '6.7.1\n' + INNO_ENGINE + '6.7.2', None),
+    (INNO_BANNER, None),
+    ('unrelated output\n', None),
+    ('', None),
 ])
-def test_windows_inno_version(actual, pin, parts, accepted):
+def test_windows_inno_engine_parser(output, expected):
     env = os.environ.copy()
     env['INNO_TEST_HELPER'] = str(ROOT / 'packaging/windows_inno_version.ps1')
-    env['INNO_TEST_CASE'] = json.dumps(dict(ProductVersion=actual, FileVersion='diagnostic-file-version',
-        ProductMajorPart=parts[0], ProductMinorPart=parts[1], ProductBuildPart=parts[2], pin=pin))
+    env['INNO_TEST_OUTPUT'] = output
+    result = run_powershell('''
+$ErrorActionPreference = 'Stop'
+. $env:INNO_TEST_HELPER
+try { Get-InnoEngineVersion $env:INNO_TEST_OUTPUT }
+catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+''', env)
+    assert (result.returncode == 0) == (expected is not None), (result.stdout, result.stderr)
+    if expected is not None:
+        assert result.stdout.strip() == expected
+    else:
+        assert 'Expected exactly one canonical Inno compiler engine version line' in result.stderr
+
+
+@pytest.mark.parametrize('pin', [
+    '6.7', '6.7.1.0', '6.7.1-dev', '06.7.1', '6.07.1', '6.7.01', '6.7.1\n', '',
+])
+def test_windows_inno_rejects_invalid_pin_before_probe(tmp_path, pin):
+    env = os.environ.copy()
+    scratch = tmp_path / 'unused-scratch'
+    env.update(INNO_TEST_HELPER=str(ROOT / 'packaging/windows_inno_version.ps1'),
+               INNO_TEST_PIN=pin, INNO_TEST_SCRATCH=str(scratch))
+    result = run_powershell('''
+$ErrorActionPreference = 'Stop'
+. $env:INNO_TEST_HELPER
+function Start-Process { throw 'Invalid pin must not reach the compiler' }
+try { Assert-InnoVersion 'unused-iscc' $env:INNO_TEST_PIN $env:INNO_TEST_SCRATCH }
+catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+''', env)
+    assert result.returncode != 0
+    assert 'Invalid pinned Inno version' in result.stderr
+    assert 'pinned=<' + pin + '>; exit code=<not started>; stdout=<>; stderr=<>' in result.stderr
+    assert not scratch.exists()
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='requires Windows batch compiler stub execution')
+@pytest.mark.parametrize('version,exit_code,engine_stream,pin,accepted', [
+    ('6.7.1', 0, 'stdout', '6.7.1', True),
+    ('0.0.0', 0, 'stdout', '0.0.0', True),
+    ('12345678901234567890.7.1', 0, 'stdout', '12345678901234567890.7.1', True),
+    *[(version, 0, 'stdout', '6.7.1', False) for version in
+      ('7.7.1', '6.8.1', '6.7.2', '6.7.10', '6.7', '6.7.1.0',
+       '6.7.1-dev', '06.7.1', '6.07.1', '6.7.01')],
+    ('6.7.1', 1, 'stdout', '6.7.1', False),
+    ('6.7.1', 0, 'none', '6.7.1', False),
+    ('6.7.1', 0, 'stderr', '6.7.1', False),
+    ('6.7.1', 0, 'duplicate', '6.7.1', False),
+    *[('6.7.1', 0, 'stdout', pin, False) for pin in
+      ('6.7', '6.7.1.0', '6.7.1-dev', '06.7.1', '6.07.1', '6.7.01', '6.7.1\n', '')],
+])
+def test_windows_inno_probe(tmp_path, version, exit_code, engine_stream, pin, accepted):
+    compiler = tmp_path / 'stub compiler.cmd'
+    receipt = tmp_path / 'probe-argument.txt'
+    scratch = tmp_path / 'scratch with spaces'
+    lines = ['@echo off', 'if "%~1"=="" exit /b 90', 'if not exist "%~1" exit /b 91',
+             '> "%INNO_TEST_RECEIPT%" echo %~f1',
+             *['echo ' + line for line in INNO_BANNER.splitlines()], 'echo probe stderr marker 1>&2']
+    if engine_stream != 'none':
+        lines.append('echo ' + INNO_ENGINE + version + (' 1>&2' if engine_stream == 'stderr' else ''))
+    if engine_stream == 'duplicate':
+        lines.append('echo ' + INNO_ENGINE + version)
+    lines.append('exit /b ' + str(exit_code))
+    compiler.write_text('\n'.join(lines) + '\n', encoding='ascii')
+    env = os.environ.copy()
+    env.update(INNO_TEST_HELPER=str(ROOT / 'packaging/windows_inno_version.ps1'),
+               INNO_TEST_COMPILER=str(compiler), INNO_TEST_SCRATCH=str(scratch),
+               INNO_TEST_PIN=pin, INNO_TEST_RECEIPT=str(receipt))
     result = run_powershell('''
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 . $env:INNO_TEST_HELPER
-$case = $env:INNO_TEST_CASE | ConvertFrom-Json
-try { Assert-InnoVersion $case $case.pin; 'accepted' }
+try { Assert-InnoVersion $env:INNO_TEST_COMPILER $env:INNO_TEST_PIN $env:INNO_TEST_SCRATCH; 'accepted' }
 catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
 ''', env)
     assert (result.returncode == 0) == accepted, (result.stdout, result.stderr)
+    valid_pin = re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', pin)
+    if valid_pin:
+        probe = Path(receipt.read_text().strip())
+        assert probe.is_relative_to(scratch) and probe.is_file()
+        setup = probe.read_text(encoding='ascii')
+        assert {'[Setup]', 'AppName=CoveArchive Inno probe', 'AppVersion=0.0.0',
+                'DefaultDirName={autopf}\\CoveArchiveInnoProbe', 'Output=no'} <= set(setup.splitlines())
+    else:
+        assert not receipt.exists()
     if accepted:
         assert result.stdout.strip() == 'accepted'
     else:
-        assert 'ProductVersion=<' + (actual or '') + '>' in result.stderr
-        assert 'FileVersion=<diagnostic-file-version>' in result.stderr
         assert 'pinned=<' + pin + '>' in result.stderr
-        if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', pin):
+        assert 'exit code=<' + (str(exit_code) if valid_pin else 'not started') + '>' in result.stderr
+        if valid_pin:
+            assert 'stdout=<' + INNO_BANNER.splitlines()[0] in result.stderr
+            assert 'stderr=<probe stderr marker' in result.stderr
+            if engine_stream != 'none':
+                assert INNO_ENGINE + version in result.stderr
+        else:
             assert 'Invalid pinned Inno version' in result.stderr
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='requires Windows batch compiler stub execution')
+def test_windows_inno_probe_caps_failure_output(tmp_path):
+    compiler = tmp_path / 'noisy.cmd'
+    compiler.write_text('@echo off\necho ' + 'A' * 2100 + '\necho ' + 'B' * 2100 + ' 1>&2\nexit /b 1\n')
+    env = os.environ.copy()
+    env.update(INNO_TEST_HELPER=str(ROOT / 'packaging/windows_inno_version.ps1'),
+               INNO_TEST_COMPILER=str(compiler), INNO_TEST_SCRATCH=str(tmp_path / 'scratch'))
+    result = run_powershell('''
+$ErrorActionPreference = 'Stop'
+. $env:INNO_TEST_HELPER
+try { Assert-InnoVersion $env:INNO_TEST_COMPILER '6.7.1' $env:INNO_TEST_SCRATCH }
+catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+''', env)
+    assert result.returncode != 0
+    assert 'pinned=<6.7.1>; exit code=<1>' in result.stderr
+    assert 'stdout=<' + 'A' * 2000 + '>; stderr=<' + 'B' * 2000 + '>' in result.stderr
+    assert 'A' * 2001 not in result.stderr and 'B' * 2001 not in result.stderr
 
 
 def test_windows_ci_enforces_inno_version():
     script = (ROOT / 'packaging/windows_ci.ps1').read_text()
     assert not re.search(r'-ne\s+\$env:INNO_VERSION\b', script, re.IGNORECASE)
     assert '. "$PSScriptRoot/windows_inno_version.ps1"' in script
-    assert 'Assert-InnoVersion (Get-Item -LiteralPath $compiler).VersionInfo $env:INNO_VERSION' in script
+    assert 'Assert-InnoVersion $compiler $env:INNO_VERSION $scratch' in script
     assert script.index('Assert-InnoVersion ') < script.index('python -m pytest')
+    assert script.index('Assert-InnoVersion ') < script.index('& $compiler ')
+    assert 'VersionInfo' not in script.split('python -m pytest', 1)[0]
+    helper = (ROOT / 'packaging/windows_inno_version.ps1').read_text()
+    assert 'VersionInfo' not in helper
+    assert not re.search(r'-ne\s+\$env:INNO_VERSION\b', helper, re.IGNORECASE)
     assert "$ErrorActionPreference = 'Stop'" in script
     assert '$PSNativeCommandUseErrorActionPreference = $true' in script
 
@@ -685,10 +811,10 @@ def test_draft_orchestration_never_replaces_assets(tmp_path):
         else: assert error and 'draft' in str(error) and len(uploads) == 1
 
 
-def synthetic_carchive(value='safe', forbidden=False):
+def synthetic_carchive(value='safe', forbidden=False, module='covearchive.fixture'):
     import zlib
     raw = zlib.compress(marshal.dumps(compile('value=' + repr(value), 'covearchive/fixture.py', 'exec')))
-    pyz = b'PYZ\0' + b'\0' * 4 + struct.pack('!I', 12 + len(raw)) + raw + marshal.dumps({'covearchive.fixture': (0, 12, len(raw))})
+    pyz = b'PYZ\0' + b'\0' * 4 + struct.pack('!I', 12 + len(raw)) + raw + marshal.dumps({module: (0, 12, len(raw))})
     members = [('PYZ.pyz', pyz)] + ([('covearchive/queue.sqlite3', b'private')] if forbidden else [])
     body = b''; toc = b''
     for name, data in members:
@@ -716,6 +842,49 @@ def test_extensionless_carchive_directory_and_deb_inspection(tmp_path):
             ('safe', True, 'forbidden package path: CoveArchive/covearchive/queue.sqlite3')):
         assert inspect_both(synthetic_carchive(value, forbidden)) == [diagnostic]
         assert inspect_both(synthetic_carchive()) == []
+
+
+@pytest.mark.parametrize('launcher', [
+    'CoveArchive', 'usr/lib/covearchive/CoveArchive', 'usr/bin/covearchive',
+    'opt/covearchive/CoveArchive',
+])
+@pytest.mark.parametrize('value', [str(ROOT), str(Path.home())])
+def test_linux_launcher_does_not_own_embedded_third_party_modules(tmp_path, launcher, value):
+    from types import SimpleNamespace
+    verify = runpy.run_path(str(ROOT / 'packaging/verify_package.py'))['verify']
+    root = package_fixture(tmp_path / 'tree', linux=True)
+    binary = root / launcher
+    binary.parent.mkdir(parents=True, exist_ok=True)
+
+    def inspect_tree_and_deb(expected):
+        assert verify(root, 'linux') == expected
+        # dpkg-deb produces a tar stream with ./-prefixed member names.
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w') as archive:
+            for path in root.rglob('*'):
+                if path.is_file():
+                    archive.add(path, arcname='./' + path.relative_to(root).as_posix())
+        with patch('subprocess.run', return_value=SimpleNamespace(stdout=stream.getvalue())):
+            assert verify(tmp_path / 'fixture.deb', 'linux') == [
+                issue.replace(': ', ': ./', 1) for issue in expected]
+
+    binary.write_bytes(synthetic_carchive(value, module='_sysconfigdata__linux_x86_64-linux-gnu'))
+    inspect_tree_and_deb([])
+    for module in ('covearchive.fixture', 'run_covearchive'):
+        binary.write_bytes(synthetic_carchive(value, module=module))
+        inspect_tree_and_deb(['forbidden build-host path: ' + launcher + '/PYZ.pyz/' + module])
+    binary.write_bytes(synthetic_carchive())
+    data = binary.parent / '_internal/covearchive/fixture.dat'
+    data.parent.mkdir(parents=True, exist_ok=True)
+    data.write_bytes(value.encode())
+    inspect_tree_and_deb(['forbidden build-host path: ' + data.relative_to(root).as_posix()])
+
+
+def test_linux_launcher_archive_member_matching_is_case_insensitive():
+    first_party = runpy.run_path(str(ROOT / 'packaging/verify_package.py'))['first_party']
+    assert not first_party('./usr/bin/CovEArchive/pYz.PyZ/_sysconfigdata__linux_x86_64-linux-gnu')
+    assert first_party('./usr/bin/CovEArchive/pYz.PyZ/covearchive.fixture')
+    assert first_party('./usr/bin/CovEArchive/pYz.PyZ/run_covearchive')
 
 
 def test_verification_container_is_digest_pinned():

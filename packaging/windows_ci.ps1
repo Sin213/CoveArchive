@@ -12,7 +12,7 @@ $env:QT_QPA_PLATFORM = 'offscreen'
 $compiler = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
 if (!(Test-Path -LiteralPath $compiler)) { throw 'Pinned Inno compiler missing' }
 . "$PSScriptRoot/windows_inno_version.ps1"
-Assert-InnoVersion (Get-Item -LiteralPath $compiler).VersionInfo $env:INNO_VERSION
+Assert-InnoVersion $compiler $env:INNO_VERSION $scratch
 python -m pytest
 Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
 $version = python -c 'import runpy;print(runpy.run_path("src/covearchive/__init__.py")["__version__"])'
