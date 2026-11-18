@@ -1,7 +1,7 @@
-# CoveArchive 1.0.1
+# CoveArchive 1.0.2
 
-## What's new in 1.0.1
-- Library: new "Open in Browse" button (also double-click or Enter on a row) sends the selected repository to Browse and starts a scan, so imported lists can be downloaded.
+## What's new in 1.0.2
+- Library: right-click menu with Open in Browse, Open on website, Copy URL, Move, Rename, Auto-Archive and Remove.
 
 CoveArchive preserves public project release assets in a local archive:
 
@@ -15,10 +15,10 @@ CoveArchive preserves public project release assets in a local archive:
 
 ## Artifacts and supported platforms
 
-- `CoveArchive-1.0.1-Setup.exe`: per-user Windows x86_64 installer.
-- `CoveArchive-1.0.1-Portable.exe`: Windows x86_64 single executable.
-- `CoveArchive-1.0.1-x86_64.AppImage`: Linux x86_64 AppImage.
-- `covearchive_1.0.1_amd64.deb`: Linux amd64 Debian package.
+- `CoveArchive-1.0.2-Setup.exe`: per-user Windows x86_64 installer.
+- `CoveArchive-1.0.2-Portable.exe`: Windows x86_64 single executable.
+- `CoveArchive-1.0.2-x86_64.AppImage`: Linux x86_64 AppImage.
+- `covearchive_1.0.2_amd64.deb`: Linux amd64 Debian package.
 - Each artifact has a matching `<artifact>.sha256` file; verify it with
   `sha256sum -c <artifact>.sha256` beside the downloaded artifact. Checksums are
   not a code-signing signature.

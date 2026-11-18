@@ -2,8 +2,8 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from PySide6 import QtWidgets as W
-from PySide6.QtCore import QAbstractTableModel, QEvent, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut, QBrush, QColor
+from PySide6.QtCore import QAbstractTableModel, QEvent, QItemSelectionModel, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QContextMenuEvent, QDesktopServices, QKeySequence, QShortcut, QBrush, QColor
 from covearchive.library import model as m, transfer as t
 from covearchive.ui.library_store import atomic_write
 from covearchive.auto_archive import NEEDS_RULES
@@ -103,6 +103,8 @@ class LibraryPanel(W.QWidget):
         self.table.horizontalHeader().setSectionResizeMode(W.QHeaderView.Stretch); right.addWidget(self.table)
         self.table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft|Qt.AlignVCenter)
         self.table.installEventFilter(self); self._column_floor()
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
         # Size status columns from visible rows; scanning Qt's default 1000 rows
         # on every layout/scrollbar change stalls the GUI after a large import.
         self.table.horizontalHeader().setResizeContentsPrecision(0)
@@ -151,6 +153,12 @@ class LibraryPanel(W.QWidget):
         self.table.horizontalHeader().setMinimumSectionSize(max(84, width + int(self.table.showGrid())))
 
     def eventFilter(self, watched, event):
+        if watched is self.table and ((event.type()==QEvent.ContextMenu and event.reason()==QContextMenuEvent.Keyboard) or
+                (event.type()==QEvent.KeyPress and (event.key()==Qt.Key_Menu or
+                (event.key()==Qt.Key_F10 and event.modifiers()==Qt.ShiftModifier)))):
+            index=self.table.currentIndex()
+            if index.isValid(): self._context_menu(self.table.visualRect(index.siblingAtColumn(0)).center())
+            return True
         if watched is self.table and event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter):
             self._open_in_browse(); return True
         if watched is self.table and event.type() == QEvent.FontChange:
@@ -190,6 +198,36 @@ class LibraryPanel(W.QWidget):
     def _open_in_browse(self):
         rows=self.table.selectionModel().selectedRows()
         if len(rows)==1: self.open_requested.emit(self.model.rows[rows[0].row()].url)
+
+    def _open_website(self,url):
+        if not QDesktopServices.openUrl(QUrl(url)): self._status("Could not open the browser","error")
+
+    def _copy_url(self,url):
+        W.QApplication.clipboard().setText(url); self._status("Copied URL","success")
+
+    def _build_menu(self):
+        self._lock(); rows=self.table.selectionModel().selectedRows()
+        url=self.model.rows[rows[0].row()].url if len(rows)==1 else ''
+        menu=W.QMenu(self); menu.setAccessibleName('Repository actions'); menu.setAccessibleDescription('Repository actions')
+        menu.aboutToHide.connect(menu.deleteLater)
+        def action(text,callback,enabled):
+            result=menu.addAction(text); result.triggered.connect(lambda *_:callback()); result.setEnabled(enabled)
+        action('Open in Browse',self._open_in_browse,self.open_button.isEnabled())
+        action('Open on website',lambda:self._open_website(url),self.open_button.isEnabled() and QUrl(url).scheme()=='https')
+        action('Copy URL',lambda:self._copy_url(url),self.open_button.isEnabled())
+        menu.addSeparator()
+        for button,callback in ((self.move,self._move),(self.rename,self._rename),
+                (self.auto_button,self._auto_archive),(self.remove,self._remove)):
+            action(button.text(),callback,button.isEnabled())
+        return menu
+
+    def _context_menu(self,pos):
+        index=self.table.indexAt(pos)
+        if not index.isValid(): return
+        selection=self.table.selectionModel()
+        if not selection.isRowSelected(index.row(),index.parent()):
+            selection.setCurrentIndex(index,QItemSelectionModel.ClearAndSelect|QItemSelectionModel.Rows)
+        menu=self._build_menu(); menu.popup(self.table.viewport().mapToGlobal(pos)); return menu
 
     def _transaction(self, op):
         if not self.store.writable: return False

@@ -7,9 +7,9 @@ import re
 import subprocess
 import sys
 
-TAG = "v1.0.1"
-NAMES = {"CoveArchive-1.0.1-Setup.exe", "CoveArchive-1.0.1-Portable.exe",
-         "CoveArchive-1.0.1-x86_64.AppImage", "covearchive_1.0.1_amd64.deb"}
+TAG = "v1.0.2"
+NAMES = {"CoveArchive-1.0.2-Setup.exe", "CoveArchive-1.0.2-Portable.exe",
+         "CoveArchive-1.0.2-x86_64.AppImage", "covearchive_1.0.2_amd64.deb"}
 
 
 def verify_release(release, expected, commit, tag_exists, receipt_path=None):
@@ -88,7 +88,7 @@ def create_or_reuse_draft(directory):
             raise ValueError("delete the draft and rerun")
     else:
         command("gh", "release", "create", TAG, "--draft", "--target", commit,
-                "--title", "CoveArchive 1.0.1", "--notes-file", "packaging/release-notes.md")
+                "--title", "CoveArchive 1.0.2", "--notes-file", "packaging/release-notes.md")
         pages = json.loads(command("gh", "api", "--paginate", "--slurp", prefix + "/releases"))
         matches = [r for page in pages for r in page if r["tag_name"] == TAG]
         if len(matches) != 1: raise ValueError("created draft not uniquely visible")

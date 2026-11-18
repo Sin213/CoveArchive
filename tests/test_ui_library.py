@@ -3,7 +3,8 @@ import os
 import sys
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QItemSelectionModel
+from PySide6.QtGui import QContextMenuEvent
 from threading import Event, current_thread
 from PySide6.QtTest import QTest
 import hashlib
@@ -97,6 +98,122 @@ def test_open_in_browse_table_activation(panel, activation):
         QTest.mouseDClick(panel.table.viewport(), Qt.LeftButton, pos=point)
     else: QTest.keyClick(panel.table, activation)
     assert emitted == [repo.url]
+
+
+@pytest.fixture
+def menu_panel(panel, monkeypatch):
+    panel.library = m.Library(repositories=tuple(m.Repository('github', f'https://github.com/Owner/Repo{i}') for i in range(3)))
+    panel.refresh(); APP.processEvents()
+    monkeypatch.setattr(p.W.QMenu, 'popup', lambda menu, pos: None)
+    return panel
+
+
+def menu_at(panel, row):
+    return panel._context_menu(panel.table.visualRect(panel.model.index(row, 0)).center())
+
+
+@pytest.mark.parametrize('readonly', [False, True])
+@pytest.mark.parametrize('count', [0, 1, 3])
+def test_repository_menu_order_and_button_states(menu_panel, readonly, count):
+    v = menu_panel; v.store.writable = not readonly
+    if count == 1: v.table.selectRow(0)
+    elif count: v.table.selectAll()
+    menu = v._build_menu(); actions = menu.actions()
+    assert [a.text() for a in actions] == ['Open in Browse', 'Open on website', 'Copy URL', '',
+        'Move to...', 'Rename...', 'Auto-Archive...', 'Remove from list...']
+    assert [a.isSeparator() for a in actions] == [False, False, False, True, False, False, False, False]
+    assert [a.isEnabled() for a in actions[:3]] == [v.open_button.isEnabled()] * 3 == [count == 1] * 3
+    assert [a.isEnabled() for a in actions[4:]] == [b.isEnabled() for b in (v.move, v.rename, v.auto_button, v.remove)]
+    assert menu.parent() is v and menu.accessibleName() and menu.accessibleDescription()
+    if readonly: assert not any(a.isEnabled() for a in actions[4:])
+
+
+def test_repository_menu_empty_area_and_row_selection(menu_panel):
+    v = menu_panel
+    point = v.table.viewport().rect().bottomRight()
+    assert not v.table.indexAt(point).isValid()
+    assert v._context_menu(point) is None
+    assert not v.table.selectionModel().selectedRows()
+    v.table.selectRow(0)
+    v.table.selectionModel().select(v.model.index(1, 0), QItemSelectionModel.Select | QItemSelectionModel.Rows)
+    assert len(v.table.selectionModel().selectedRows()) == 2
+    menu = menu_at(v, 1)
+    assert len(v.table.selectionModel().selectedRows()) == 2 and not menu.actions()[0].isEnabled()
+    menu.deleteLater()
+    menu = menu_at(v, 2)
+    assert [i.row() for i in v.table.selectionModel().selectedRows()] == [2]
+    assert v.table.currentIndex().row() == 2 and menu.actions()[0].isEnabled()
+    menu.deleteLater()
+
+
+def test_repository_menu_mouse_context_event(menu_panel, monkeypatch):
+    v = menu_panel; seen = []
+    monkeypatch.setattr(p.W.QMenu, 'popup', lambda menu, pos: seen.append((menu, pos)))
+    assert v.table.contextMenuPolicy() == Qt.CustomContextMenu
+    point = v.table.visualRect(v.model.index(1, 0)).center()
+    QTest.mouseClick(v.table.viewport(), Qt.RightButton, pos=point)
+    APP.sendEvent(v.table.viewport(), QContextMenuEvent(QContextMenuEvent.Mouse, point, v.table.viewport().mapToGlobal(point)))
+    assert seen and seen[-1][1] == v.table.viewport().mapToGlobal(point)
+    assert [i.row() for i in v.table.selectionModel().selectedRows()] == [1]
+    v.table.selectAll(); QTest.mouseClick(v.table.viewport(), Qt.RightButton, pos=point)
+    APP.sendEvent(v.table.viewport(), QContextMenuEvent(QContextMenuEvent.Mouse, point, v.table.viewport().mapToGlobal(point)))
+    assert len(v.table.selectionModel().selectedRows()) == 3
+
+
+@pytest.mark.parametrize('activation', ['menu', 'shift_f10', 'context_event'])
+def test_repository_menu_keyboard_at_current_row(menu_panel, monkeypatch, activation):
+    v = menu_panel; seen = []; v.table.selectRow(1); v.table.setFocus()
+    monkeypatch.setattr(p.W.QMenu, 'popup', lambda menu, pos: seen.append((menu, pos)))
+    if activation == 'context_event':
+        point = v.table.rect().bottomRight()
+        APP.sendEvent(v.table, QContextMenuEvent(QContextMenuEvent.Keyboard, point, v.table.mapToGlobal(point)))
+    else: QTest.keyClick(v.table, Qt.Key_Menu if activation == 'menu' else Qt.Key_F10,
+        Qt.NoModifier if activation == 'menu' else Qt.ShiftModifier)
+    assert len(seen) == 1
+    assert seen[0][1] == v.table.viewport().mapToGlobal(v.table.visualRect(v.model.index(1, 0)).center())
+    assert [i.row() for i in v.table.selectionModel().selectedRows()] == [1]
+    v.table.clearSelection(); v.table.setCurrentIndex(v.model.index(-1, -1)); seen.clear()
+    QTest.keyClick(v.table, Qt.Key_Menu); assert not seen
+
+
+@pytest.mark.parametrize('readonly', [False, True])
+def test_repository_menu_copy_and_open_in_browse(menu_panel, readonly):
+    v = menu_panel; v.store.writable = not readonly; emitted = []; v.open_requested.connect(emitted.append)
+    actions = menu_at(v, 1).actions(); url = v.model.rows[1].url
+    actions[0].trigger(); assert emitted == [url]
+    APP.clipboard().setText('before'); actions[2].trigger()
+    assert APP.clipboard().text() == url and v.status.text() == 'Copied URL'
+    assert v.status.property('tone') == 'success'
+
+
+@pytest.mark.parametrize('success', [False, True])
+@pytest.mark.parametrize('readonly', [False, True])
+def test_repository_menu_open_website(menu_panel, monkeypatch, success, readonly):
+    v = menu_panel; v.store.writable = not readonly; calls = []
+    monkeypatch.setattr(p.QDesktopServices, 'openUrl', lambda url: calls.append(url) or success)
+    action = menu_at(v, 0).actions()[1]; assert action.isEnabled(); action.trigger()
+    assert len(calls) == 1 and isinstance(calls[0], p.QUrl) and calls[0].toString() == v.model.rows[0].url
+    if not success:
+        assert v.status.text() == 'Could not open the browser' and v.status.property('tone') == 'error'
+
+
+def test_repository_menu_http_disables_only_website(menu_panel, monkeypatch):
+    v = menu_panel; url = 'http://forge.example/Owner/Repo'
+    v.library = m.Library(repositories=(m.Repository('gitea', url),)); v.refresh()
+    monkeypatch.setattr(p.QDesktopServices, 'openUrl', lambda *_: pytest.fail('disabled URL opened'))
+    actions = menu_at(v, 0).actions()
+    assert [a.isEnabled() for a in actions[:3]] == [True, False, True]
+    actions[1].trigger(); actions[2].trigger(); assert APP.clipboard().text() == url
+
+
+def test_repository_menu_existing_mutating_slots(automatic_panel, monkeypatch):
+    v = automatic_panel.panel; calls = []
+    for name in ('_move', '_rename', '_auto_archive', '_remove'):
+        monkeypatch.setattr(v, name, lambda name=name: calls.append(name))
+    v.table.selectRow(0); actions = v._build_menu().actions()
+    assert all(a.isEnabled() for a in actions[4:])
+    for action in actions[4:]: action.trigger()
+    assert calls == ['_move', '_rename', '_auto_archive', '_remove']
 
 
 def test_add_bulk_real_paste_and_normal_field_paste(panel, monkeypatch):
