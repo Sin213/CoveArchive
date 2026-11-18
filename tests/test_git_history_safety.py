@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace as NS
 
 import pytest
 
@@ -230,6 +231,70 @@ def test_fsck_bad_objects_rejected_without_publication(local, damage, monkeypatc
     assert error.value.code == "invalid_objects"
     assert "fetch" in commands[-1], "fetch.fsckObjects must reject the bad objects on receipt"
     assert not list(local[1].rglob("history.json"))
+
+
+@pytest.fixture
+def cleanup_clock(monkeypatch):
+    clock = NS(elapsed=0., sleeps=[])
+    def sleep(seconds):
+        assert 0 < seconds <= .05
+        clock.sleeps.append(seconds); clock.elapsed += seconds
+    monkeypatch.setattr(gh, "time", NS(monotonic=lambda: clock.elapsed, sleep=sleep))
+    monkeypatch.setattr(gh, "_check", lambda *args: pytest.fail("cleanup checked cancellation/deadline"))
+    return clock
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows sharing/permission errors")
+@pytest.mark.parametrize("winerror", [5, 32, 145])
+def test_cleanup_retries_transient_windows_errors(tmp_path, monkeypatch, cleanup_clock, winerror):
+    tree = tmp_path / "private"; tree.mkdir(); (tree / "pack").write_bytes(b"pack")
+    remove = gh.shutil.rmtree; attempts = []
+    error = OSError(0, "transient cleanup failure", str(tree), winerror)
+    def transient(path, **kwargs):
+        attempts.append(path)
+        assert callable(kwargs["onexc"])
+        if len(attempts) <= 3: raise error
+        return remove(path, **kwargs)
+    monkeypatch.setattr(gh.shutil, "rmtree", transient)
+    gh._rmtree(tree)
+    assert len(attempts) == 4 and not tree.exists()
+    assert len(cleanup_clock.sleeps) == 3
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows sharing violations")
+def test_cleanup_persistent_sharing_violation_raises(tmp_path, monkeypatch, cleanup_clock):
+    tree = tmp_path / "private"; tree.mkdir(); attempts = []
+    error = PermissionError(0, "sharing violation", str(tree), 32)
+    def locked(path, **kwargs):
+        attempts.append(path); raise error
+    monkeypatch.setattr(gh.shutil, "rmtree", locked)
+    with pytest.raises(PermissionError) as caught: gh._rmtree(tree)
+    assert caught.value is error and tree.exists()
+    assert 3 <= cleanup_clock.elapsed <= 3.001
+    assert 60 <= len(cleanup_clock.sleeps) <= 61
+    assert len(attempts) == len(cleanup_clock.sleeps) + 1
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError(), OSError(errno.EIO, "I/O error"),
+                                  PermissionError(errno.EACCES, "not a Windows sharing error")])
+def test_cleanup_does_not_retry_other_errors(tmp_path, monkeypatch, cleanup_clock, error):
+    tree = tmp_path / "private"; tree.mkdir(); attempts = []
+    def failed(path, **kwargs):
+        attempts.append(path); raise error
+    monkeypatch.setattr(gh.shutil, "rmtree", failed)
+    with pytest.raises(type(error)) as caught: gh._rmtree(tree)
+    assert caught.value is error and attempts == [tree] and not cleanup_clock.sleeps
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows sharing violations")
+def test_cleanup_does_not_retry_when_path_is_gone(tmp_path, monkeypatch, cleanup_clock):
+    tree = tmp_path / "missing"; attempts = []
+    error = PermissionError(0, "sharing violation", str(tree), 32)
+    def failed(path, **kwargs):
+        attempts.append(path); raise error
+    monkeypatch.setattr(gh.shutil, "rmtree", failed)
+    with pytest.raises(PermissionError) as caught: gh._rmtree(tree)
+    assert caught.value is error and attempts == [tree] and not cleanup_clock.sleeps
 
 
 def test_size_poll_throttled_and_readonly_cleanup(tmp_path, monkeypatch):

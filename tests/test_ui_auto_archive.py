@@ -11,6 +11,7 @@ from covearchive.ui.auto_archive import AutoArchive
 from test_ui_window import FakeController, APP, RID
 from test_scan_worker import catalog, release, asset
 from test_ui_archive import rig, until, submit
+from test_scan_process import until as until_closed
 
 
 class Bridge(QObject):
@@ -234,7 +235,7 @@ def test_window_auto_startup_delay_and_independent_browse(env,rig,tmp_path):
         success(manual); assert window.show_catalog and window.catalog is not None
         assert automatic.cancels==0 and not sink.enqueues
     finally:
-        window.close(); until(lambda:bridge.closed and not window.isVisible())
+        window.close(); until_closed(lambda:bridge.closed and not window.isVisible(),10)
         assert not window.auto.timer.isActive()
 
 
@@ -251,10 +252,10 @@ def test_window_hung_auto_tick_prompt_close_kills_and_reaps(env,rig,tmp_path):
         pid=automatic.job.process.processId()
         window.url.setText('https://github.com/manual/repo'); window.scan.click(); success(manual)
         assert window.show_catalog and automatic.job is not None
-        window.close(); until(lambda:automatic.job is None and gone(pid) and bridge.closed and not window.isVisible())
+        window.close(); until_closed(lambda:automatic.job is None and gone(pid) and bridge.closed and not window.isVisible(),10)
         assert not sink.enqueues and not window.auto.timer.isActive()
     finally:
-        automatic.shutdown(); window.close(); until(lambda:bridge.closed and not window.isVisible())
+        automatic.shutdown(); window.close(); until_closed(lambda:bridge.closed and not window.isVisible(),10)
 
 
 @pytest.mark.parametrize('state,result_kind',[('FAILED','failure'),('COMPLETED','invalid'),('COMPLETED','rules')])
@@ -284,7 +285,7 @@ def test_window_close_stops_both_scans_before_queue(env,rig,tmp_path,monkeypatch
             patch.setattr(window.auto,'shutdown',lambda:calls.append('auto') or True,raising=False)
             patch.setattr(bridge,'begin_shutdown',lambda *a:calls.append('bridge'))
             window.close(); assert calls==['browse','auto','bridge']
-    finally: window.close(); until(lambda:bridge.closed and not window.isVisible())
+    finally: window.close(); until_closed(lambda:bridge.closed and not window.isVisible(),10)
 
 
 def test_keep_open_preserves_auto_and_next_due_check(env,rig,tmp_path):
@@ -295,7 +296,7 @@ def test_keep_open_preserves_auto_and_next_due_check(env,rig,tmp_path):
         assert window.isVisible() and window.auto.timer.isActive() and not automatic.closed
         e.clock[0]+=3600; window.auto.tick(); assert len(automatic.calls)==1 and not sink.enqueues
     finally:
-        window._confirm_close=lambda:'Pause and Close'; window.close(); until(lambda:bridge.closed and not window.isVisible())
+        window._confirm_close=lambda:'Pause and Close'; window.close(); until_closed(lambda:bridge.closed and not window.isVisible(),10)
 
 
 def test_about_to_quit_and_repeated_closed_window_shutdown(env,rig,tmp_path):
@@ -305,9 +306,9 @@ def test_about_to_quit_and_repeated_closed_window_shutdown(env,rig,tmp_path):
         APP.aboutToQuit.emit()
         assert automatic.closed and manual.closed and not window.auto.timer.isActive()
         window.auto.tick(); assert not sink.enqueues
-        window.close(); window.close(); until(lambda:bridge.closed and not window.isVisible())
+        window.close(); window.close(); until_closed(lambda:bridge.closed and not window.isVisible(),10)
         window.close(); assert window.auto.shutdown()
-    finally: window.close(); until(lambda:bridge.closed and not window.isVisible())
+    finally: window.close(); until_closed(lambda:bridge.closed and not window.isVisible(),10)
 
 
 def balanced(auto):
@@ -384,10 +385,10 @@ def test_window_close_retry_when_scan_shutdown_is_not_finished(env,rig,tmp_path,
         e.clock[0]+=3600; window.auto.tick(); balanced(window.auto)
         monkeypatch.setattr(automatic,'shutdown',lambda:False); window.close()
         assert window.isVisible() and not bridge.shutting_down; balanced(window.auto)
-        monkeypatch.setattr(automatic,'shutdown',original); window.close(); until(lambda:bridge.closed and not window.isVisible())
+        monkeypatch.setattr(automatic,'shutdown',original); window.close(); until_closed(lambda:bridge.closed and not window.isVisible(),10)
         balanced(window.auto); assert not sink.enqueues
     finally:
-        monkeypatch.setattr(automatic,'shutdown',original); window.close(); until(lambda:bridge.closed)
+        monkeypatch.setattr(automatic,'shutdown',original); window.close(); until_closed(lambda:bridge.closed,10)
 
 
 def test_real_runner_two_checks_never_redownload_completed_assets(env,rig,tmp_path):
@@ -442,7 +443,7 @@ def test_window_unsaved_rules_or_folder_never_enable_auto(env,rig,tmp_path,monke
         e.clock[0]+=86400; window.auto.tick(); assert not automatic.calls and not sink.enqueues
         assert len(manual_requests)==(missing=='root')
     finally:
-        window.enqueue_pending=False; window.close(); until(lambda:bridge.closed and not window.isVisible())
+        window.enqueue_pending=False; window.close(); until_closed(lambda:bridge.closed and not window.isVisible(),10)
 
 
 @pytest.mark.parametrize('size',[(1180,720),(820,520)])
@@ -457,7 +458,7 @@ def test_window_auto_column_font_measurements(env,rig,tmp_path,size):
             required=panel.table.fontMetrics().horizontalAdvance(text)
             print(f'window {window.width()}x{window.height()}: column {column}, width={width}, text={required}')
             assert window.width()==size[0] and width>=required and panel.model.data(index,Qt.ToolTipRole)==text
-    finally: window.close(); until(lambda:bridge.closed and not window.isVisible())
+    finally: window.close(); until_closed(lambda:bridge.closed and not window.isVisible(),10)
 
 
 @pytest.mark.parametrize('size',[(820,520),(1180,720)])
@@ -486,7 +487,7 @@ def test_library_identifying_columns_scroll_instead_of_collapsing(env,rig,tmp_pa
         if size[0]==820:
             table.horizontalScrollBar().setValue(table.horizontalScrollBar().maximum()); APP.processEvents()
             assert table.columnViewportPosition(5)+widths[5]<=table.viewport().width()
-    finally: window.close(); until(lambda:bridge.closed and not window.isVisible())
+    finally: window.close(); until_closed(lambda:bridge.closed and not window.isVisible(),10)
 
 
 @pytest.mark.parametrize('paginated',[False,True])

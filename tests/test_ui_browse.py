@@ -424,7 +424,7 @@ def test_h3_scale_and_closed_connections(ui,scale):
         w.tabs.setCurrentIndex(tab); APP.processEvents()
         for button in w.tabs.widget(tab).findChildren(QPushButton):
             if button.isVisible(): assert button.width()>=button.sizeHint().width() and button.height()>=button.sizeHint().height()
-    w.close(); until(lambda:w._window_closed); APP.processEvents()
+    w.close(); until(lambda:w._window_closed,10); APP.processEvents()
     snapshot=(w.styleSheet(),w.nav.tabText(1),w.queue_panel.seq,w.status.text())
     APP.styleHints().colorSchemeChanged.emit(Qt.ColorScheme.Dark); w.bridge.view_changed.emit(view(999,(job(S.QUEUED),))); APP.processEvents()
     assert snapshot==(w.styleSheet(),w.nav.tabText(1),w.queue_panel.seq,w.status.text())

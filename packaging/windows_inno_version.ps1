@@ -30,8 +30,11 @@ Output=no
 '@ | Set-Content -LiteralPath $probe -Encoding ASCII -ErrorAction Stop
         $stdoutPath = Join-Path $probeDir 'stdout.txt'
         $stderrPath = Join-Path $probeDir 'stderr.txt'
-        $process = Start-Process -FilePath $Compiler -ArgumentList "`"$probe`"" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -ErrorAction Stop
+        $process = Start-Process -FilePath $Compiler -ArgumentList "`"$probe`"" -PassThru -NoNewWindow -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -ErrorAction Stop
+        $null = $process.Handle
+        $process.WaitForExit()
         $exitCode = $process.ExitCode
+        if ($exitCode -isnot [int]) { throw 'Inno compiler probe returned a null or non-integer exit code' }
         $stdout = [IO.File]::ReadAllText($stdoutPath)
         $stderr = [IO.File]::ReadAllText($stderrPath)
         if ($exitCode -ne 0) { throw 'Inno compiler probe failed' }

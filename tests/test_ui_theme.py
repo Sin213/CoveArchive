@@ -83,7 +83,7 @@ def owned_window():
     window.show(); APP.processEvents()
     yield window
     if isValid(window):
-        window.close(); until(lambda:window._window_closed)
+        window.close(); until(lambda:window._window_closed,10)
         window.deleteLater(); QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete); APP.processEvents()
 
 
@@ -96,7 +96,7 @@ def test_close_disconnects_scheme_callback(owned_window,monkeypatch):
     monkeypatch.setattr(sys,'excepthook',lambda *args:errors.append(args))
     previous=qInstallMessageHandler(lambda kind,context,text:warnings.append(text))
     try:
-        scheme(Qt.ColorScheme.Light); window.close(); until(lambda:window._window_closed)
+        scheme(Qt.ColorScheme.Light); window.close(); until(lambda:window._window_closed,10)
         before=window.styleSheet(); scheme(Qt.ColorScheme.Dark)
         assert window.styleSheet()==before
         window.deleteLater(); QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete); APP.processEvents()

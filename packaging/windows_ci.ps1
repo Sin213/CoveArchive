@@ -49,7 +49,10 @@ python packaging/verify_package.py $onedir --platform windows
 function Test-Application([string]$Executable, [string]$Label) {
     foreach ($flag in @('--smoke-test', '--package-selftest')) {
         $output = "$scratch/results/$Label-$($flag.Substring(2)).stdout"
-        $process = Start-Process -FilePath $Executable -ArgumentList $flag -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $output -RedirectStandardError "$output.stderr"
+        $process = Start-Process -FilePath $Executable -ArgumentList $flag -WindowStyle Hidden -PassThru -RedirectStandardOutput $output -RedirectStandardError "$output.stderr"
+        $null = $process.Handle
+        $process.WaitForExit()
+        if ($process.ExitCode -isnot [int]) { throw "$Label $flag returned a null or non-integer exit code" }
         if ($process.ExitCode -ne 0) { throw "$Label $flag failed: $($process.ExitCode)" }
         if ($flag -eq '--package-selftest') {
             $report = Get-Content -Raw -LiteralPath $output | ConvertFrom-Json
@@ -78,12 +81,18 @@ try {
 Set-Content -LiteralPath $sentinel -Value 'preserve-user-data'
 $before = (Get-FileHash -Algorithm SHA256 -LiteralPath $sentinel).Hash
 Test-UninstallRegistration $false
-$install = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$installDir`"") -WindowStyle Hidden -Wait -PassThru
+$install = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$installDir`"") -WindowStyle Hidden -PassThru
+$null = $install.Handle
+$install.WaitForExit()
+if ($install.ExitCode -isnot [int]) { throw 'Silent per-user install returned a null or non-integer exit code' }
 if ($install.ExitCode -ne 0) { throw 'Silent per-user install failed' }
 Test-UninstallRegistration $true
 python packaging/verify_package.py $installDir --platform windows
 Test-Application "$installDir/CoveArchive.exe" 'installed'
-$uninstall = Start-Process -FilePath "$installDir/unins000.exe" -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -WindowStyle Hidden -Wait -PassThru
+$uninstall = Start-Process -FilePath "$installDir/unins000.exe" -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -WindowStyle Hidden -PassThru
+$null = $uninstall.Handle
+$uninstall.WaitForExit()
+if ($uninstall.ExitCode -isnot [int]) { throw 'Silent uninstall returned a null or non-integer exit code' }
 if ($uninstall.ExitCode -ne 0) { throw 'Silent uninstall failed' }
 Test-UninstallRegistration $false
 for ($i=0; $i -lt 50 -and (Test-Path -LiteralPath $installDir); $i++) { Start-Sleep -Milliseconds 100 }

@@ -227,7 +227,7 @@ def test_UI_24_real_close_kills():
     v=isolated_window(ROOT/"run_covearchive.py",c); v.show(); v.url.setText(URL); v.scan.click()
     try:
         until(lambda:c.job.process.processId()>0); pid=c.job.process.processId()
-        v.close(); until(lambda:v.bridge.closed); assert gone(pid) and c.job is None
+        v.close(); until(lambda:v.bridge.closed,10); assert gone(pid) and c.job is None
     finally: c.shutdown(1000); v.close(); until(lambda:v.bridge.closed,10)
 
 

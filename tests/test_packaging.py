@@ -391,12 +391,12 @@ def test_windows_ci_real_aria2_gate():
         assert 'real_aria2_tests' in [arg.arg for arg in functions[name].args.args]
 
 
-def run_powershell(script, env=None):
+def run_powershell(script, env=None, timeout=20):
     executable = shutil.which('powershell') or shutil.which('pwsh')
     if executable is None:
         pytest.skip('PowerShell is not installed')
     return subprocess.run([executable, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
-                          env=env, capture_output=True, text=True, timeout=20)
+                          env=env, capture_output=True, text=True, timeout=timeout)
 
 
 INNO_BANNER = 'Inno Setup 6 Command-Line Compiler\nCopyright (C) 1997-2026 Jordan Russell\n'
@@ -487,14 +487,20 @@ def test_windows_inno_probe(tmp_path, version, exit_code, engine_stream, pin, ac
     env = os.environ.copy()
     env.update(INNO_TEST_HELPER=str(ROOT / 'packaging/windows_inno_version.ps1'),
                INNO_TEST_COMPILER=str(compiler), INNO_TEST_SCRATCH=str(scratch),
-               INNO_TEST_PIN=pin, INNO_TEST_RECEIPT=str(receipt))
+               INNO_TEST_PIN=pin, INNO_TEST_RECEIPT=str(receipt),
+               INNO_TEST_ATTEMPTS=str(25 if accepted and version == '6.7.1' else 1))
     result = run_powershell('''
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 . $env:INNO_TEST_HELPER
-try { Assert-InnoVersion $env:INNO_TEST_COMPILER $env:INNO_TEST_PIN $env:INNO_TEST_SCRATCH; 'accepted' }
+try {
+    for ($i = 0; $i -lt [int]$env:INNO_TEST_ATTEMPTS; $i++) {
+        Assert-InnoVersion $env:INNO_TEST_COMPILER $env:INNO_TEST_PIN $env:INNO_TEST_SCRATCH
+    }
+    'accepted'
+}
 catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
-''', env)
+''', env, timeout=60)
     assert (result.returncode == 0) == accepted, (result.stdout, result.stderr)
     valid_pin = re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', pin)
     if valid_pin:
@@ -507,6 +513,7 @@ catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
         assert not receipt.exists()
     if accepted:
         assert result.stdout.strip() == 'accepted'
+        assert len(list(scratch.glob('inno-probe-*'))) == int(env['INNO_TEST_ATTEMPTS'])
     else:
         assert 'pinned=<' + pin + '>' in result.stderr
         assert 'exit code=<' + (str(exit_code) if valid_pin else 'not started') + '>' in result.stderr
@@ -536,6 +543,48 @@ catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     assert 'pinned=<6.7.1>; exit code=<1>' in result.stderr
     assert 'stdout=<' + 'A' * 2000 + '>; stderr=<' + 'B' * 2000 + '>' in result.stderr
     assert 'A' * 2001 not in result.stderr and 'B' * 2001 not in result.stderr
+
+
+@pytest.mark.parametrize('exit_code', ['$null', "'0'", "'invalid'"])
+def test_windows_inno_probe_rejects_missing_or_non_integer_exit_code(tmp_path, exit_code):
+    env = os.environ.copy()
+    env.update(INNO_TEST_HELPER=str(ROOT / 'packaging/windows_inno_version.ps1'),
+               INNO_TEST_SCRATCH=str(tmp_path / 'scratch'), INNO_TEST_EXIT_CODE=exit_code,
+               INNO_TEST_ENGINE=INNO_ENGINE + '6.7.1')
+    result = run_powershell('''
+$ErrorActionPreference = 'Stop'
+. $env:INNO_TEST_HELPER
+function Start-Process {
+    param($RedirectStandardOutput, $RedirectStandardError)
+    [IO.File]::WriteAllText($RedirectStandardOutput, $env:INNO_TEST_ENGINE)
+    [IO.File]::WriteAllText($RedirectStandardError, '')
+    $process = [pscustomobject]@{ Handle = 1; ExitCode = (Invoke-Expression $env:INNO_TEST_EXIT_CODE) }
+    $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {}
+    return $process
+}
+try { Assert-InnoVersion 'stub' '6.7.1' $env:INNO_TEST_SCRATCH }
+catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+''', env)
+    assert result.returncode != 0
+    assert 'Inno compiler probe returned a null or non-integer exit code' in result.stderr
+    assert 'pinned=<6.7.1>' in result.stderr
+    assert 'stdout=<' + INNO_ENGINE + '6.7.1>' in result.stderr
+
+
+def test_windows_process_exit_codes_require_cached_handle_and_wait():
+    count = 0
+    for path in (ROOT / 'packaging').glob('*.ps1'):
+        script = path.read_text()
+        starts = list(re.finditer(r'(?im)^\s*(\$\w+)\s*=\s*Start-Process\b[^\n]*-PassThru\b[^\n]*\n', script))
+        assert len(starts) == len(re.findall(r'(?i)\bStart-Process\b[^\n]*-PassThru\b', script)), path
+        for start in starts:
+            process = re.escape(start[1])
+            following = script[start.end():]
+            wait = re.match(rf'\s*\$null\s*=\s*{process}\.Handle\s*\n\s*{process}\.WaitForExit\(\)\s*\n', following)
+            assert wait is not None, (path, start[1])
+            assert re.search(rf'{process}\.ExitCode\b', following[wait.end():]), path
+            count += 1
+    assert count == 4
 
 
 def test_windows_ci_enforces_inno_version():

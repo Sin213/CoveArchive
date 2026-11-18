@@ -148,7 +148,19 @@ def _rmtree(path):
     # Cleanup must finish even after cancellation/deadline; never abandon temp packs.
     def writable(function, name, exc):
         os.chmod(name, stat.S_IWRITE | stat.S_IREAD); function(name)
-    shutil.rmtree(path, onexc=writable)
+    deadline = time.monotonic() + 3
+    while True:
+        try:
+            shutil.rmtree(path, onexc=writable)
+            return
+        except OSError as exc:
+            # Dying children, antivirus, and indexers can briefly hold Windows handles.
+            if os.name != "nt" or getattr(exc, "winerror", None) not in (5, 32, 145) or not Path(path).exists():
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(.05, remaining))
 
 
 @contextmanager
