@@ -55,6 +55,50 @@ def idle(panel):
     assert not getattr(panel, "busy", False)
 
 
+def test_open_in_browse_selection_and_accessibility(panel):
+    assert not panel.open_button.isEnabled()
+    panel.library = t.build_plan(encoded(git_sync_document(2)), panel.library).apply(panel.library); panel.refresh()
+    assert not panel.open_button.isEnabled()
+    select(panel, panel.model.rows[0].identity); assert panel.open_button.isEnabled()
+    assert panel.open_button.text() == panel.open_button.accessibleName() == panel.open_button.accessibleDescription() == "Open in Browse"
+    assert panel.open_button not in panel.mutating and panel.auto_button.nextInFocusChain() is panel.open_button
+    panel.table.selectAll(); assert not panel.open_button.isEnabled()
+    emitted = []; panel.open_requested.connect(emitted.append)
+    panel.open_button.click(); QTest.keyClick(panel.table, Qt.Key_Return)
+    assert emitted == []
+    panel.table.clearSelection(); assert not panel.open_button.isEnabled()
+    QTest.keyClick(panel.table, Qt.Key_Enter); assert emitted == []
+
+
+@pytest.mark.parametrize("readonly", [False, True])
+@pytest.mark.parametrize("provider,url", [("github", "https://github.com/Owner/Repo"),
+    ("gitlab", "https://gitlab.com/Group/Sub/Repo"), ("gitea", "https://codeberg.org/Owner/Repo"),
+    ("gitea", "https://forge.example/Owner/Repo")])
+def test_open_in_browse_emits_repository_url(panel, readonly, provider, url):
+    panel.library = m.Library(repositories=(m.Repository(provider, url),)); panel.refresh()
+    panel.store.writable = not readonly; panel._lock()
+    select(panel, panel.model.rows[0].identity)
+    assert panel.open_button.isEnabled() and panel.model.rows[0].active == (provider == "github")
+    emitted = []; panel.open_requested.connect(emitted.append); panel.open_button.click()
+    assert emitted == [panel.model.rows[0].url] == [url]
+    panel.table.clearSelection(); assert not panel.open_button.isEnabled()
+
+
+@pytest.mark.parametrize("activation", ["double_click", Qt.Key_Return, Qt.Key_Enter])
+def test_open_in_browse_table_activation(panel, activation):
+    panel.library = t.build_plan(encoded(git_sync_document(2)), panel.library).apply(panel.library); panel.refresh()
+    repo = next(r for r in panel.model.rows if not r.active); select(panel, repo.identity)
+    emitted = []; panel.open_requested.connect(emitted.append)
+    panel.table.setFocus(); APP.processEvents()
+    if activation == "double_click":
+        index = panel.model.index(next(i for i, r in enumerate(panel.model.rows) if r.identity == repo.identity), 0)
+        point = panel.table.visualRect(index).center()
+        QTest.mouseClick(panel.table.viewport(), Qt.LeftButton, pos=point)
+        QTest.mouseDClick(panel.table.viewport(), Qt.LeftButton, pos=point)
+    else: QTest.keyClick(panel.table, activation)
+    assert emitted == [repo.url]
+
+
 def test_add_bulk_real_paste_and_normal_field_paste(panel, monkeypatch):
     panel.url.setText("https://github.com/o/r"); panel.add.click(); panel.url.setText("https://github.com/o/r"); panel.add.click()
     assert "Added 0, skipped 1 duplicate(s), failed 0" == panel.status.text()

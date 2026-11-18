@@ -305,6 +305,7 @@ class MainWindow(QMainWindow):
         self.library_store = library if library is not None else LibraryStore()
         self.library_panel = LibraryPanel(self.library_store, self, protected=self._protected_roots,auto=self.auto); self.tabs.addTab(self.library_panel, "Library")
         self.library_panel.changed.connect(self.auto.sync)
+        self.library_panel.open_requested.connect(self._open_in_browse)
         self.tabs.tabBar().setAccessibleName("Browse, Queue and Library tabs"); self.tabs.setAccessibleName("Browse, Queue and Library"); self.tabs.setAccessibleDescription("Switch between build selection, archive queue and repository library")
         for button in (self.scan, self.archive_selected): set_role(button, "primary")
         for button in (self.cancel, self.history_cancel): set_role(button, "danger")
@@ -335,7 +336,7 @@ class MainWindow(QMainWindow):
         browse_panes.install(self)
         self.tabs.setFocusPolicy(Qt.NoFocus); self.tabs.tabBar().setFocusPolicy(Qt.NoFocus)
         order=[self.nav,self.url,self.scan,self.cancel,self.queue_chip,self.theme_toggle,self.settings_button,self.filter_toggle,*self.formats.values(),self.prereleases,self.include,self.exclude,self.save_rules,self.releases_toggle,self.release_list,self.show_prereleases,self.select_matching,self.clear_selection,self.tree,self.root,self.browse,self.archive_selected,self.history_button,self.history_cancel,self.queue_panel.start,*self.queue_panel.buttons.values(),self.queue_panel.table]
-        order += [getattr(self.library_panel,name) for name in ('url','add','bulk','import_button','export_button','search','tree','new','rename_collection','delete','table','move','rename','remove','auto_button')]
+        order += [getattr(self.library_panel,name) for name in ('url','add','bulk','import_button','export_button','search','tree','new','rename_collection','delete','table','move','rename','remove','auto_button','open_button')]
         for view in (self.tree,self.release_list,self.queue_panel.table,self.library_panel.tree,self.library_panel.table): view.setTabKeyNavigation(False)
         self.inspector.setFocusPolicy(Qt.NoFocus); self.center_overlay.setFocusPolicy(Qt.NoFocus)
         for previous,following in zip(order,order[1:]+order[:1]): QWidget.setTabOrder(previous,following)
@@ -350,6 +351,11 @@ class MainWindow(QMainWindow):
 
     def _scan_from_toolbar(self):
         self.tabs.setCurrentIndex(0); self._start()
+
+    def _open_in_browse(self, url):
+        if self.active_id is not None or self.controller.job is not None:
+            self.tabs.setCurrentIndex(0); self._status("A scan is already running",True); return
+        self.url.setText(url); self._scan_from_toolbar()
 
     def set_appearance(self, name, *, persist=True):
         self._theme.set_override(name)

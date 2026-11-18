@@ -134,6 +134,29 @@ def test_UI_02_controls_defaults(ui):
     assert v.status.text() == "Ready" and v.status.textFormat() == Qt.PlainText
 
 
+@pytest.mark.parametrize("url,supported", [("https://github.com/Owner/Repo", True),
+    ("https://gitlab.com/Group/Sub/Repo", True), ("https://codeberg.org/Owner/Repo", True),
+    ("https://forge.example/Owner/Repo", False)])
+def test_library_open_in_browse_scan(ui, url, supported):
+    v,c = ui; v.tabs.setCurrentIndex(2); v.library_panel.open_requested.emit(url)
+    assert v.url.text() == url and v.tabs.currentIndex() == 0
+    assert c.calls == ([url] if supported else [])
+    if not supported: assert v.status.text().startswith("Invalid URL: not a supported")
+    assert v.library_panel.auto_button.nextInFocusChain() is v.library_panel.open_button
+
+
+@pytest.mark.parametrize("running", ["active_id", "job", "both"])
+def test_library_open_in_browse_preserves_running_scan(ui, running):
+    v,c = ui; v.url.setText(URL)
+    if running == "both": v.scan.click()
+    elif running == "active_id": v.active_id = RID
+    else: c.job = RID
+    before = list(c.calls); v.tabs.setCurrentIndex(2)
+    v.library_panel.open_requested.emit("https://github.com/Other/Repo")
+    assert v.tabs.currentIndex() == 0 and v.url.text() == URL and c.calls == before
+    assert "scan is already running" in v.status.text().lower() and v.status.property("tone") == "error"
+
+
 @pytest.mark.parametrize("url", ["invalid", URL+"/releases/tag/v1"])
 def test_UI_03_invalid_no_process(ui, url):
     v, c = ui; v.url.setText(url); v.scan.click()

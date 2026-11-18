@@ -725,7 +725,7 @@ def test_draft_receipt_refuses_every_mismatch(tmp_path):
     import copy
     module = runpy.run_path(str(ROOT / 'packaging/draft_release.py'))
     expected = {'asset.exe': {'size': 3, 'sha256': 'a' * 64}}
-    good = {'tag_name': 'v1.0.0', 'draft': True, 'target_commitish': 'b' * 40,
+    good = {'tag_name': 'v1.0.1', 'draft': True, 'target_commitish': 'b' * 40,
             'html_url': 'https://example.invalid/draft',
             'assets': [{'name': 'asset.exe', 'size': 3, 'sha256': 'a' * 64}]}
     receipt = tmp_path / 'receipt.json'
@@ -925,7 +925,7 @@ def test_draft_orchestration_never_replaces_assets(tmp_path, monkeypatch, mode, 
                 for name, data in contents.items()}
     assert len(expected) == 8
     calls = []; downloads = []
-    state = dict(id=1, tag_name='v1.0.0', draft=True, target_commitish='a' * 40,
+    state = dict(id=1, tag_name='v1.0.1', draft=True, target_commitish='a' * 40,
                  html_url='https://example.invalid/draft', assets=[])
     exists = mode in ('reuse-empty', 'reused', 'wrong-commit', 'published')
     if mode == 'reused': state['assets'] = [dict(id=7, name=sorted(names)[0], size=1)]
@@ -935,7 +935,7 @@ def test_draft_orchestration_never_replaces_assets(tmp_path, monkeypatch, mode, 
 
     def fake_api(endpoint):
         if '/git/matching-refs/' in endpoint:
-            return [{'ref': 'refs/tags/v1.0.0'}] if mode == 'tag-exists' else []
+            return [{'ref': 'refs/tags/v1.0.1'}] if mode == 'tag-exists' else []
         assert endpoint.endswith('/releases/1'); return copy.deepcopy(state)
 
     def fake_command(*args):
@@ -945,7 +945,7 @@ def test_draft_orchestration_never_replaces_assets(tmp_path, monkeypatch, mode, 
             assert '--draft' in args and args[args.index('--target') + 1] == 'a' * 40
             exists = True; return b''
         if args[1:3] == ('release', 'upload'):
-            assert args[3] == 'v1.0.0'
+            assert args[3] == 'v1.0.1'
             assert args[4:] == tuple(str(inputs / name) for name in sorted(expected))
             assert {Path(path).name for path in args[4:]} == names | {name + '.sha256' for name in names}
             assert all(Path(path).read_bytes() == contents[Path(path).name] for path in args[4:])

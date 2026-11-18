@@ -57,6 +57,7 @@ def _prepare_import(path, snapshot):
 
 class LibraryPanel(W.QWidget):
     changed=Signal()
+    open_requested=Signal(str)
     def __init__(self, store, parent=None, protected=lambda: (), auto=None):
         super().__init__(parent)
         self.protected = protected; self.auto=auto
@@ -115,6 +116,7 @@ class LibraryPanel(W.QWidget):
         actions.addStretch(); actions=W.QHBoxLayout(); actions.setSpacing(4); right.addLayout(actions)
         self.remove = button("Remove from list...", self._remove, actions)
         self.auto_button=button('Auto-Archive...',self._auto_archive,actions)
+        self.open_button=button('Open in Browse',self._open_in_browse,actions,False)
         actions.addStretch()
         for value in (self.delete, self.remove): set_role(value, 'danger')
         auto_frame=W.QFrame(); auto_frame.setFrameShape(W.QFrame.StyledPanel); auto_frame.setProperty("section","card"); layout.addWidget(auto_frame)
@@ -126,16 +128,17 @@ class LibraryPanel(W.QWidget):
         for label in (self.status,self.auto_detail): label.setSizePolicy(W.QSizePolicy.Ignored,W.QSizePolicy.Preferred)
         set_tone(self.status,"muted")
         controls = [self.url, self.add, self.bulk, self.import_button, self.export_button, self.search, self.tree,
-            self.new, self.rename_collection, self.delete, self.table, self.move, self.rename, self.remove, self.auto_button,self.auto_detail,self.status]
+            self.new, self.rename_collection, self.delete, self.table, self.move, self.rename, self.remove, self.auto_button,self.open_button,self.auto_detail,self.status]
         for widget, name in zip(controls, ["Repository URL", "Add repository", "Bulk add", "Import library", "Export library",
                 "Search library", "Collections", "New collection", "Rename collection", "Delete collection", "Repositories",
-                "Move repositories", "Rename repository", "Remove repositories", "Auto-Archive settings","Auto-Archive details","Library status"]):
+                "Move repositories", "Rename repository", "Remove repositories", "Auto-Archive settings","Open in Browse","Auto-Archive details","Library status"]):
             widget.setAccessibleName(name); widget.setAccessibleDescription(name)
         for first, second in zip(controls, controls[1:]): self.setTabOrder(first, second)
         self.paste_shortcut = QShortcut(QKeySequence.StandardKey.Paste, self)
         self.paste_shortcut.setContext(Qt.WidgetWithChildrenShortcut); self.paste_shortcut.activated.connect(self._paste)
         self.search.textChanged.connect(self._filter); self.tree.currentItemChanged.connect(self._scope)
         self.table.selectionModel().selectionChanged.connect(lambda *_: (self._lock(),self._show_auto_detail()))
+        self.table.doubleClicked.connect(lambda *_: self._open_in_browse())
         if self.auto is not None: self.auto.changed.connect(self._auto_changed)
         self.url.returnPressed.connect(self._add); self.refresh(); self._lock()
 
@@ -148,6 +151,8 @@ class LibraryPanel(W.QWidget):
         self.table.horizontalHeader().setMinimumSectionSize(max(84, width + int(self.table.showGrid())))
 
     def eventFilter(self, watched, event):
+        if watched is self.table and event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self._open_in_browse(); return True
         if watched is self.table and event.type() == QEvent.FontChange:
             self._column_floor(); self.table.verticalHeader().setDefaultSectionSize(self.table.fontMetrics().height()+12)
         return super().eventFilter(watched, event)
@@ -179,7 +184,12 @@ class LibraryPanel(W.QWidget):
         count = len(self.table.selectionModel().selectedRows())
         for widget in (self.move, self.remove, self.rename): widget.setEnabled(self.store.writable and (count == 1 if widget is self.rename else count > 0))
         self.auto_button.setEnabled(self.store.writable and count>0 and self.auto is not None)
+        self.open_button.setEnabled(count == 1)
         self._empty_state()
+
+    def _open_in_browse(self):
+        rows=self.table.selectionModel().selectedRows()
+        if len(rows)==1: self.open_requested.emit(self.model.rows[rows[0].row()].url)
 
     def _transaction(self, op):
         if not self.store.writable: return False

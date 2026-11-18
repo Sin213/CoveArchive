@@ -8,7 +8,7 @@ on:
         type: string
 permissions: {}
 concurrency:
-  group: covearchive-v1.0.0-draft
+  group: covearchive-v1.0.1-draft
   cancel-in-progress: false
 env:
   PYTHON_VERSION: 3.12.10
