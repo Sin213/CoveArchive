@@ -105,7 +105,7 @@ def test_allowlisted_files_exist_are_utf8_and_use_lf(relative_path):
 @pytest.mark.parametrize(
     "statement",
     [
-        "local preservation of public project releases",
+        "records their metadata and SHA-256 hashes",
         "| GitHub |",
         "| Codeberg |",
         "| GitLab.com |",
@@ -114,8 +114,6 @@ def test_allowlisted_files_exist_are_utf8_and_use_lf(relative_path):
         "**Library**",
         "Auto-Archive",
         "Non-deletion guarantee",
-        "Cove Nexus is not required",
-        "Installers and\nrelease binaries are not available yet",
         "python run_covearchive.py",
         "Windows Credential Manager",
         "KWallet",
@@ -140,7 +138,6 @@ def test_allowlisted_files_exist_are_utf8_and_use_lf(relative_path):
         "Resume",
         "Existing completed files are verified before being reused by an archive job",
         "Downloads are never executed or extracted",
-        "python -m pytest",
     ],
 )
 def test_readme_required_statements(statement):

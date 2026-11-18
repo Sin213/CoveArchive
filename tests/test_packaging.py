@@ -523,11 +523,14 @@ def test_version_metadata_and_artifact_contract():
     assert all(name in notes for name in names)
 
 
-def test_readme_release_builds_are_documented_without_announcing_downloads():
-    readme = (ROOT / 'README.md').read_text()
-    assert '### Release builds' in readme
-    assert 'workflow_dispatch' in readme and 'draft-only' in readme
-    assert 'Installers and\nrelease binaries are not available yet' in readme
+def test_release_notes_document_unsigned_artifacts_without_announcing_downloads():
+    notes = (ROOT / 'packaging/release-notes.md').read_text()
+    assert 'All binaries are unsigned' in notes
+    assert 'not a code-signing signature' in notes
+    assert 'Windows requires 64-bit Windows 10 or newer' in notes
+    assert 'glibc >= 2.35' in notes
+    assert 'Git 2.45 or newer' in notes and 'auto-update' in notes
+    assert 'available now' not in notes and 'download now' not in notes.lower()
 
 
 def test_preflight_refuses_wrong_commit_branch_or_version(tmp_path):
