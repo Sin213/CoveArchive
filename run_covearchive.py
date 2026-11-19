@@ -13,6 +13,9 @@ if __name__ == "__main__":
     if "--scan-worker" in sys.argv:
         from covearchive.scan_worker import main
         os._exit(main())
+    elif "--discover-worker" in sys.argv:
+        from covearchive.discover.worker import main
+        os._exit(main())
     elif "--package-selftest" in sys.argv:
         from covearchive.ui.package_selftest import main
         raise SystemExit(main(LAUNCHER))

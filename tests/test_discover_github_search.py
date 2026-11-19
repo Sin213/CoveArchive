@@ -403,7 +403,7 @@ def test_import_isolation_and_lazy_package(transport):
 
 def test_source_import_boundaries():
     paths = sorted((ROOT / "src/covearchive/discover").glob("*.py"))
-    assert {p.name for p in paths} == {"__init__.py", "models.py", "query.py", "github_search.py"}
+    assert {p.name for p in paths} == {"__init__.py", "models.py", "query.py", "github_search.py", "worker.py"}
     for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -418,7 +418,15 @@ def test_source_import_boundaries():
                 assert all(m.split(".")[0] in sys.stdlib_module_names or m == "covearchive.github.urls"
                            for m in modules), (path, modules)
             if path.name != "github_search.py":
-                assert not any(m.endswith("client") or m.endswith("github_search") for m in modules)
+                if path.name == "worker.py" and modules == ["github_search"]:
+                    # The Qt-free worker may lazily construct only DS1's public
+                    # client, inside run_search, after offline query validation.
+                    assert isinstance(node, ast.ImportFrom) and node.level == 1
+                    assert [(alias.name, alias.asname) for alias in node.names] == [("GitHubSearchClient", None)]
+                    assert node in list(ast.walk(next(n for n in tree.body
+                        if isinstance(n, ast.FunctionDef) and n.name == "run_search")))
+                else:
+                    assert not any(m.endswith("client") or m.endswith("github_search") for m in modules)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                 assert node.func.id != "__import__"
                 if node.func.id == "import_module":
