@@ -50,7 +50,7 @@ ALLOWLIST = (
 
 
 def test_version():
-    assert __version__ == "1.0.2"
+    assert __version__ == "1.1.0"
 
 
 def test_pyproject_bootstrap_contract():
@@ -193,7 +193,7 @@ def test_imports_succeed_when_optional_third_party_modules_are_blocked():
             "    assert Path(module.__file__).resolve().is_relative_to(src)",
             "assert sys.modules['requests'] is None",
             "assert sys.modules['PySide6'] is None",
-            "assert covearchive.__version__ == '1.0.2'",
+            "assert covearchive.__version__ == '1.1.0'",
             "print('imports isolated')",
         ]
     )

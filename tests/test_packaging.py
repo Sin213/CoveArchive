@@ -736,6 +736,11 @@ def test_public_notes_and_debian_policy_metadata():
     notes = (ROOT / 'packaging/release-notes.md').read_text()
     assert 'Windows 10 or newer' in notes
     assert 'Planned artifacts' not in notes and 'not available' not in notes
+    for phrase in ('## Discover', 'Discover searches public GitHub only',
+                   'not proof of authenticity or playability',
+                   'does not automatically enable Auto-Archive',
+                   'Auto-Archive operates only while the application is running'):
+        assert phrase in notes
     control = (ROOT / 'packaging/linux/control.in').read_text()
     assert 'Maintainer: Cove <noreply@covearchive.invalid>' in control
     assert 'Homepage: https://github.com/Sin213/CoveArchive' in control
@@ -798,7 +803,7 @@ def test_draft_receipt_refuses_every_mismatch(tmp_path):
     import copy
     module = runpy.run_path(str(ROOT / 'packaging/draft_release.py'))
     expected = {'asset.exe': {'size': 3, 'sha256': 'a' * 64}}
-    good = {'tag_name': 'v1.0.2', 'draft': True, 'target_commitish': 'b' * 40,
+    good = {'tag_name': 'v1.1.0', 'draft': True, 'target_commitish': 'b' * 40,
             'html_url': 'https://example.invalid/draft',
             'assets': [{'name': 'asset.exe', 'size': 3, 'sha256': 'a' * 64}]}
     receipt = tmp_path / 'receipt.json'
@@ -998,7 +1003,7 @@ def test_draft_orchestration_never_replaces_assets(tmp_path, monkeypatch, mode, 
                 for name, data in contents.items()}
     assert len(expected) == 8
     calls = []; downloads = []
-    state = dict(id=1, tag_name='v1.0.2', draft=True, target_commitish='a' * 40,
+    state = dict(id=1, tag_name='v1.1.0', draft=True, target_commitish='a' * 40,
                  html_url='https://example.invalid/draft', assets=[])
     exists = mode in ('reuse-empty', 'reused', 'wrong-commit', 'published')
     if mode == 'reused': state['assets'] = [dict(id=7, name=sorted(names)[0], size=1)]
@@ -1008,7 +1013,7 @@ def test_draft_orchestration_never_replaces_assets(tmp_path, monkeypatch, mode, 
 
     def fake_api(endpoint):
         if '/git/matching-refs/' in endpoint:
-            return [{'ref': 'refs/tags/v1.0.2'}] if mode == 'tag-exists' else []
+            return [{'ref': 'refs/tags/v1.1.0'}] if mode == 'tag-exists' else []
         assert endpoint.endswith('/releases/1'); return copy.deepcopy(state)
 
     def fake_command(*args):
@@ -1018,7 +1023,7 @@ def test_draft_orchestration_never_replaces_assets(tmp_path, monkeypatch, mode, 
             assert '--draft' in args and args[args.index('--target') + 1] == 'a' * 40
             exists = True; return b''
         if args[1:3] == ('release', 'upload'):
-            assert args[3] == 'v1.0.2'
+            assert args[3] == 'v1.1.0'
             assert args[4:] == tuple(str(inputs / name) for name in sorted(expected))
             assert {Path(path).name for path in args[4:]} == names | {name + '.sha256' for name in names}
             assert all(Path(path).read_bytes() == contents[Path(path).name] for path in args[4:])

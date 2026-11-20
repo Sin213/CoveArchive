@@ -1,24 +1,33 @@
-# CoveArchive 1.0.2
+# CoveArchive 1.1.0
 
-## What's new in 1.0.2
-- Library: right-click menu with Open in Browse, Open on website, Copy URL, Move, Rename, Auto-Archive and Remove.
+## Discover
 
-CoveArchive preserves public project release assets in a local archive:
+Search public GitHub repositories in CoveArchive to find emulators,
+recompilations, native ports and decomps. Filter by project category and sort by
+relevance, stars or recent updates. Review classification evidence and project
+information, then open discovered repositories in Browse to check their releases.
+
+## Library integration
+
+Save discovered repositories to Library, with duplicates detected automatically.
+Organize them into collections, open GitHub project pages and copy repository
+URLs. After saving, optionally configure the existing Auto-Archive settings.
+
+## Existing preservation capabilities
 
 - Browse GitHub, Codeberg and GitLab.com releases, select assets by format and
-  filename filters, and download through a persistent queue.
-- Record metadata and SHA-256 hashes; verify existing completed assets before
-  reuse and preserve conflicts and earlier archives instead of overwriting them.
-- Organize GitHub repositories in Library collections, import/export repository
-  lists, and opt in to Auto-Archive while the application window is open.
-- Manually archive Git history as bundles using an optional external Git install.
+  filename filters, and archive selected release assets through a persistent queue.
+- Record metadata and verify downloads with SHA-256; verify existing completed
+  assets before reuse and keep previously archived versions even when upstream
+  listings change.
+- Preserve public Git history as optional Git bundles using an external Git install.
 
 ## Artifacts and supported platforms
 
-- `CoveArchive-1.0.2-Setup.exe`: per-user Windows x86_64 installer.
-- `CoveArchive-1.0.2-Portable.exe`: Windows x86_64 single executable.
-- `CoveArchive-1.0.2-x86_64.AppImage`: Linux x86_64 AppImage.
-- `covearchive_1.0.2_amd64.deb`: Linux amd64 Debian package.
+- `CoveArchive-1.1.0-Setup.exe`: per-user Windows x86_64 installer.
+- `CoveArchive-1.1.0-Portable.exe`: Windows x86_64 single executable.
+- `CoveArchive-1.1.0-x86_64.AppImage`: Linux x86_64 AppImage.
+- `covearchive_1.1.0_amd64.deb`: Linux amd64 Debian package.
 - Each artifact has a matching `<artifact>.sha256` file; verify it with
   `sha256sum -c <artifact>.sha256` beside the downloaded artifact. Checksums are
   not a code-signing signature.
@@ -32,6 +41,11 @@ Git 2.45 or newer on PATH is optional, required only for Git-history bundles.
 Git and aria2 are not bundled; normal downloads use the built-in requests path.
 
 ## Data and limitations
+
+Discover searches public GitHub only. Classification is not proof of authenticity or playability.
+GitHub metadata does not confirm official status, OS compatibility or release availability.
+Adding to Library does not automatically enable Auto-Archive.
+Auto-Archive operates only while the application is running.
 
 All binaries are unsigned. Windows SmartScreen or antivirus may warn about them.
 The portable executable uses the same `%LOCALAPPDATA%\CoveArchive` preferences,
