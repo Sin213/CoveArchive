@@ -417,7 +417,7 @@ def test_window_library_icon_and_close(ui, tmp_path, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(sys, "platform", "linux")
         assert getattr(v, "_protected_roots", lambda: [])() == [default_queue_path().parent, v.root.text(), v.settings["archive_root"]]
-    assert (v.tabs.count(), v.windowIcon().isNull()) == (3, False)
+    assert (v.tabs.count(), v.windowIcon().isNull()) == (4, False)
     assert v.tabs.tabText(2) == "Library" and v.windowIcon().availableSizes()[0].width() == 512
     from covearchive.ui import branding
     asset = Path(branding.__file__).parents[1] / "assets/covearchive-icon.png"; raw = asset.read_bytes()

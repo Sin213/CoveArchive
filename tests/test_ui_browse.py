@@ -304,13 +304,13 @@ def test_n1_nav_fits_every_selected_tab(ui,width):
     from PySide6.QtWidgets import QToolButton
     w,_=ui; w.resize(width,800); APP.processEvents()
     widths=None
-    for selected in range(3):
+    for selected in range(4):
         w.tabs.setCurrentIndex(selected); APP.processEvents()
         assert not w.nav.usesScrollButtons()
-        current=[w.nav.tabRect(i).width() for i in range(3)]
+        current=[w.nav.tabRect(i).width() for i in range(4)]
         if widths is None: widths=current
         assert current==widths and w.nav.width()>=w.nav.sizeHint().width()
-        for index in range(3): assert w.nav.rect().contains(w.nav.tabRect(index))
+        for index in range(4): assert w.nav.rect().contains(w.nav.tabRect(index))
         assert not any(button.isVisible() for button in w.nav.findChildren(QToolButton))
         assert not w.nav.geometry().intersects(w.url.parentWidget().geometry())
 
@@ -420,7 +420,7 @@ def test_h3_scale_and_closed_connections(ui,scale):
     from test_ui_queue import view,job,S
     w,c=ui; succeed(w,c,release()); font=QFont(w.font()); font.setPointSizeF(font.pointSizeF()*scale)
     w.setFont(font); w.resize(1280,800)
-    for tab in range(3):
+    for tab in range(4):
         w.tabs.setCurrentIndex(tab); APP.processEvents()
         for button in w.tabs.widget(tab).findChildren(QPushButton):
             if button.isVisible(): assert button.width()>=button.sizeHint().width() and button.height()>=button.sizeHint().height()

@@ -22,13 +22,16 @@ from pathlib import Path
 from covearchive.ui.preferences import PreferenceStore
 from covearchive.ui.library_store import LibraryStore
 from covearchive.ui.library_panel import LibraryPanel
+from covearchive.ui.discover_panel import DiscoverPanel
+from covearchive.ui.discover_process import DiscoverController
+from covearchive.discover.models import SearchResult
 from covearchive.queue.store import default_queue_path, QueueError
 from covearchive.ui.branding import app_icon
 from covearchive.ui.archive_bridge import ArchiveBridge, EnqueueRequest, EnqueueItem
 from covearchive.github.token import GitHubAuth
 from covearchive.ui.credential_vault import platform_vault
 from covearchive.github.select import select_releases
-from covearchive.github.urls import GitHubUrlError, ReleaseTagTarget, ReleaseListTarget, RepositoryTarget
+from covearchive.github.urls import GitHubUrlError, ReleaseTagTarget, ReleaseListTarget, RepositoryTarget, parse_github_url
 from covearchive.providers import parse_repository_url, canonical_url, display_name
 from covearchive.scan_worker import ProtocolError, ScanFailure
 from covearchive.ui.scan_process import ScanController
@@ -192,12 +195,15 @@ class OptionalLabel(ElidedLabel):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, launcher=None, controller=None, *, bridge=None, preferences=None, library=None, auto_scan=None, auto_clock=time.time, auth=None):
+    def __init__(self, launcher=None, controller=None, *, bridge=None, preferences=None, library=None, auto_scan=None, auto_clock=time.time, auth=None, discover_controller=None):
         super().__init__()
         self.auth = auth if auth is not None else GitHubAuth(None)
         self.setWindowTitle("CoveArchive"); self.resize(1180,720); self.setMinimumSize(820,520)
         self.setWindowIcon(app_icon())
         self.controller = controller if controller is not None else ScanController(launcher, parent=self, auth=self.auth)
+        self.discover_controller = discover_controller if discover_controller is not None else DiscoverController(launcher, parent=self)
+        self.discover_controller.setParent(self)
+        self._discover_closing = False
         self.catalog = None; self.show_catalog = False; self.active_id = None
         self.started = 0; self.checked=set(); self.eligible={}; self.rules=BuildRules(); self._rules_repo=None; self.enqueue_pending=False; self._scan_provider='github'
         self.bridge=bridge if bridge is not None else ArchiveBridge(parent=self, runner_options={"auth":self.auth})
@@ -213,8 +219,9 @@ class MainWindow(QMainWindow):
         toolbar=QHBoxLayout(self.toolbar); toolbar.setContentsMargins(8,4,8,4); toolbar.setSpacing(4)
         self.nav=browse_panes.NavTabs(); self.nav.setDocumentMode(True); self.nav.setExpanding(False)
         self.nav.setUsesScrollButtons(False); self.nav.setSizePolicy(QSizePolicy.Fixed,QSizePolicy.Fixed)
-        self.nav.setAccessibleName('Browse, Queue and Library tabs')
-        for name in ('Browse','Queue','Library'): self.nav.addTab(name)
+        self.nav.setAccessibleName('Browse, Queue, Library and Discover tabs')
+        self.nav.setAccessibleDescription('Switch between Browse, Queue, Library and Discover')
+        for name in ('Browse','Queue','Library','Discover'): self.nav.addTab(name)
         toolbar.addWidget(self.nav)
         central = QWidget(); self.tabs=QTabWidget(); shell_layout.addWidget(self.tabs,1); self.tabs.addTab(central,"Browse"); layout = QVBoxLayout(central); central.setObjectName("browsePage"); layout.setSpacing(3); layout.setContentsMargins(8,6,8,6)
         self.tabs.tabBar().hide(); self.nav.currentChanged.connect(self.tabs.setCurrentIndex)
@@ -223,7 +230,7 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout(url_container); row.setContentsMargins(4,0,4,0); row.setSpacing(4)
         self.url = QLineEdit(); self.url.setPlaceholderText("https://github.com/owner/repository/releases, codeberg.org/owner/repository or gitlab.com/group/project")
         self.scan = QPushButton("Scan"); self.cancel = QPushButton("Cancel Scan"); self.cancel.setEnabled(False)
-        self.url.setMinimumWidth(40); self.cancel.hide()
+        self.url.setMinimumWidth(20); self.cancel.hide()
         toolbar.addWidget(self.scan); toolbar.addWidget(self.cancel)
         self.provider = QLabel("Unsupported"); self.provider.setTextFormat(Qt.PlainText)
         self.provider.setObjectName("providerBadge"); self.provider.setAlignment(Qt.AlignCenter)
@@ -306,18 +313,24 @@ class MainWindow(QMainWindow):
         self.library_panel = LibraryPanel(self.library_store, self, protected=self._protected_roots,auto=self.auto); self.tabs.addTab(self.library_panel, "Library")
         self.library_panel.changed.connect(self.auto.sync)
         self.library_panel.open_requested.connect(self._open_in_browse)
-        self.tabs.tabBar().setAccessibleName("Browse, Queue and Library tabs"); self.tabs.setAccessibleName("Browse, Queue and Library"); self.tabs.setAccessibleDescription("Switch between build selection, archive queue and repository library")
+        self.discover_panel = DiscoverPanel(self.discover_controller, self)
+        self.tabs.addTab(self.discover_panel, 'Discover')
+        self.discover_panel.open_requested.connect(self._open_discovered)
+        self.discover_controller.terminal.connect(self._discover_terminal)
+        QApplication.instance().aboutToQuit.connect(self.discover_controller.shutdown)
+        self.tabs.tabBar().setAccessibleName("Browse, Queue, Library and Discover tabs"); self.tabs.setAccessibleName("Browse, Queue, Library and Discover"); self.tabs.setAccessibleDescription("Switch between build selection, archive queue, repository library and public repository discovery")
         for button in (self.scan, self.archive_selected): set_role(button, "primary")
         for button in (self.cancel, self.history_cancel): set_role(button, "danger")
         self._theme = ThemeTracker(self,self.settings.get('appearance'))
         self._theme.changed.connect(self._chrome_icons); self._chrome_icons()
         self._navigation_shortcuts = []
-        for index in range(3):
+        for index in range(4):
             shortcut = QShortcut(QKeySequence(f"Ctrl+{index + 1}"), self)
             shortcut.setContext(Qt.WindowShortcut)
-            shortcut.activated.connect(lambda tab=index: self.tabs.setCurrentIndex(tab))
+            shortcut.activated.connect(lambda tab=index: self._navigate(tab))
             self._navigation_shortcuts.append(shortcut)
             self.tabs.setTabToolTip(index, f"{self.tabs.tabText(index)} (Ctrl+{index + 1})")
+            self.nav.setTabToolTip(index, self.tabs.tabToolTip(index))
         shortcut = QShortcut(QKeySequence("Ctrl+L"), self)
         shortcut.setContext(Qt.WindowShortcut)
         shortcut.activated.connect(self._focus_source)
@@ -337,6 +350,7 @@ class MainWindow(QMainWindow):
         self.tabs.setFocusPolicy(Qt.NoFocus); self.tabs.tabBar().setFocusPolicy(Qt.NoFocus)
         order=[self.nav,self.url,self.scan,self.cancel,self.queue_chip,self.theme_toggle,self.settings_button,self.filter_toggle,*self.formats.values(),self.prereleases,self.include,self.exclude,self.save_rules,self.releases_toggle,self.release_list,self.show_prereleases,self.select_matching,self.clear_selection,self.tree,self.root,self.browse,self.archive_selected,self.history_button,self.history_cancel,self.queue_panel.start,*self.queue_panel.buttons.values(),self.queue_panel.table]
         order += [getattr(self.library_panel,name) for name in ('url','add','bulk','import_button','export_button','search','tree','new','rename_collection','delete','table','move','rename','remove','auto_button','open_button')]
+        order += self.discover_panel.focus_controls
         for view in (self.tree,self.release_list,self.queue_panel.table,self.library_panel.tree,self.library_panel.table): view.setTabKeyNavigation(False)
         self.inspector.setFocusPolicy(Qt.NoFocus); self.center_overlay.setFocusPolicy(Qt.NoFocus)
         for previous,following in zip(order,order[1:]+order[:1]): QWidget.setTabOrder(previous,following)
@@ -350,12 +364,38 @@ class MainWindow(QMainWindow):
         self.nav.setMinimumWidth(self.nav.sizeHint().width())
 
     def _scan_from_toolbar(self):
-        self.tabs.setCurrentIndex(0); self._start()
+        self.tabs.setCurrentIndex(0); return self._start()
+
+    def _navigate(self, tab):
+        self.tabs.setCurrentIndex(tab)
+        if tab == 3: self.discover_panel.focus_search()
+
+    def _open_discovered(self, result):
+        panel = self.discover_panel
+        try:
+            if not isinstance(result, SearchResult): raise ValueError
+            target = parse_github_url(result.url)
+            if (target != RepositoryTarget(result.owner, result.name)
+                    or result.url != f'https://github.com/{result.owner}/{result.name}'):
+                raise ValueError
+        except (ValueError, TypeError):
+            panel.show_message('Cannot open this result: its GitHub repository URL is invalid.', error=True)
+            return
+        if self.active_id is not None or self.controller.job is not None:
+            panel.show_message('Another Browse scan is running. Wait for it to finish, then open this repository.', error=True)
+            return
+        if not self._open_in_browse(result.url):
+            panel.show_message('Browse could not start the release scan. Try again.', error=True)
 
     def _open_in_browse(self, url):
         if self.active_id is not None or self.controller.job is not None:
-            self.tabs.setCurrentIndex(0); self._status("A scan is already running",True); return
-        self.url.setText(url); self._scan_from_toolbar()
+            self.tabs.setCurrentIndex(0); self._status("A scan is already running",True); return False
+        self.url.setText(url); return self._scan_from_toolbar()
+
+    def _discover_terminal(self, *_):
+        if self._discover_closing and not self._window_closed:
+            self._discover_closing = False
+            QTimer.singleShot(0, self.close)
 
     def set_appearance(self, name, *, persist=True):
         self._theme.set_override(name)
@@ -476,18 +516,18 @@ class MainWindow(QMainWindow):
         browse_panes.center_state(self,'empty')
 
     def _start(self):
-        if self.active_id is not None or self.controller.job is not None: return
+        if self.active_id is not None or self.controller.job is not None: return False
         text=self.url.text().strip().lower()
         self._scan_provider=next((p for p,h in (('gitlab','gitlab.com'),('codeberg','codeberg.org')) if text.startswith(('https://'+h+'/',h+'/'))),'github')
         try:
             target = parse_repository_url(self.url.text())
             if isinstance(target,ReleaseTagTarget):
-                self._clear(); self._status("Invalid URL: paste the repository or its /releases URL",True); return
+                self._clear(); self._status("Invalid URL: paste the repository or its /releases URL",True); return False
             self._scan_provider=target.provider; self.url.setAccessibleName(display_name(target.provider)+' URL')
             self._scan_url=canonical_url(RepositoryTarget(target.owner,target.repo,target.provider,target.host))
-            self.controller.start(self._scan_url)
+            return self.controller.start(self._scan_url)
         except (GitHubUrlError,TypeError,ProtocolError):
-            self._clear(); self._status(f"Invalid URL: not a supported {display_name(self._scan_provider)} repository/releases URL",True); return
+            self._clear(); self._status(f"Invalid URL: not a supported {display_name(self._scan_provider)} repository/releases URL",True); return False
 
     def _state(self, request_id, state):
         if self._window_closed: return
@@ -703,6 +743,8 @@ class MainWindow(QMainWindow):
             self._history_enabled(); event.ignore(); return
         self.history_controller.shutdown()
         if not self.controller.shutdown(): event.ignore(); return
+        if not self.discover_controller.shutdown(timeout_ms=0):
+            self._discover_closing=True; event.ignore(); return
         if self.bridge.closed:
             if not self.auto.shutdown(): event.ignore(); return
             if not self._window_closed:
@@ -712,8 +754,12 @@ class MainWindow(QMainWindow):
                 self.queue_panel.disconnect_bridge()
                 for signal,slot in self._bridge_slots: signal.disconnect(slot)
                 self.controller.state_changed.disconnect(self._state); self.controller.terminal.disconnect(self._terminal)
+                self.discover_panel.disconnect_controller()
+                self.discover_panel.open_requested.disconnect(self._open_discovered)
+                self.discover_controller.terminal.disconnect(self._discover_terminal)
                 QApplication.instance().aboutToQuit.disconnect(self.controller.shutdown); self.clock.stop()
                 QApplication.instance().aboutToQuit.disconnect(self.auto.shutdown)
+                QApplication.instance().aboutToQuit.disconnect(self.discover_controller.shutdown)
                 self._theme.disconnect()
                 self._window_closed=True
             event.accept(); return

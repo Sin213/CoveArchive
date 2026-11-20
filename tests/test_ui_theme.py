@@ -121,7 +121,7 @@ def test_ignored_close_keeps_theme_tracking(owned_window,monkeypatch):
 def test_window_navigation_shortcuts(ui):
     window, controller = ui
     window.activateWindow()
-    for key, tab in ((Qt.Key_2, 1), (Qt.Key_3, 2), (Qt.Key_1, 0)):
+    for key, tab in ((Qt.Key_2, 1), (Qt.Key_3, 2), (Qt.Key_4, 3), (Qt.Key_1, 0)):
         QTest.keyClick(APP.focusWidget() or window, key, Qt.ControlModifier)
         APP.processEvents()
         assert window.tabs.currentIndex() == tab
