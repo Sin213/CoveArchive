@@ -3,15 +3,16 @@
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
-from PySide6.QtCore import QEvent, QSize, Qt, Signal
-from PySide6.QtGui import QKeySequence, QPainter, QShortcut
+from PySide6.QtCore import QEvent, QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QContextMenuEvent, QDesktopServices, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QApplication, QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
     QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSplitter,
     QVBoxLayout, QWidget,
 )
 
-from covearchive.discover.models import EvidenceSource, Tri
+from covearchive.discover.models import EvidenceSource, SearchResult, Tri
+from covearchive.github.urls import RepositoryTarget, parse_github_url
 from covearchive.discover.query import MAX_RETRIEVABLE, SearchQueryError, build_search_query
 from covearchive.discover.worker import DiscoverFailure, DiscoverSuccess, ERROR_CODES
 from .queue_panel import _safe_lines
@@ -43,6 +44,16 @@ class SearchSnapshot:
     sort: str
     page: int = 1
     per_page: int = 30
+
+
+def discovered_repository_url(result):
+    """Use the same strict result/URL consistency check for every handoff."""
+    if not isinstance(result, SearchResult): raise ValueError
+    target = parse_github_url(result.url)
+    if (target != RepositoryTarget(result.owner, result.name)
+            or result.url != f'https://github.com/{result.owner}/{result.name}'):
+        raise ValueError
+    return result.url
 
 
 class _ElidedLabel(QLabel):
@@ -102,6 +113,8 @@ def failure_text(result):
 
 class DiscoverPanel(QWidget):
     open_requested = Signal(object)
+    save_requested = Signal(object)
+    library_requested = Signal()
 
     def __init__(self, controller, parent=None):
         super().__init__(parent)
@@ -114,6 +127,7 @@ class DiscoverPanel(QWidget):
         self._starting = False
         self._closed = False
         self._retryable = False
+        self.saved_lookup = lambda url: None
         self.setAccessibleName('Discover repositories')
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
@@ -162,6 +176,8 @@ class DiscoverPanel(QWidget):
         self.results.setTextElideMode(Qt.ElideRight)
         self.results.setUniformItemSizes(True)
         self.results.setTabKeyNavigation(False)
+        self.results.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.results.customContextMenuRequested.connect(self._context_menu)
         self.details = QPlainTextEdit()
         self.details.setReadOnly(True)
         self.details.setMinimumSize(0, 70)
@@ -172,11 +188,24 @@ class DiscoverPanel(QWidget):
         self.splitter.setChildrenCollapsible(False)
         layout.addWidget(self.splitter, 1)
         actions = QHBoxLayout()
+        actions.setSpacing(4)
+        self.add_button = QPushButton('Add to Library')
         self.open_button = QPushButton('Open in Browse')
-        self.previous = QPushButton('Previous page')
-        self.next = QPushButton('Next page')
+        self.previous = QPushButton('Previous')
+        self.next = QPushButton('Next')
         self.retry = QPushButton('Retry')
-        for widget in (self.open_button, self.previous, self.next, self.retry):
+        self.more_button = QPushButton('More')
+        self.more_menu = QMenu(self)
+        self.more_menu.setAccessibleName('Discover repository actions')
+        self.more_menu.setAccessibleDescription('Open on GitHub, copy the repository URL or go to Library.')
+        self.github_action = self.more_menu.addAction('Open on GitHub', self.open_on_github)
+        self.copy_action = self.more_menu.addAction('Copy Repository URL', self.copy_repository_url)
+        self.library_action = self.more_menu.addAction('Go to Library', self.go_to_library)
+        for action in self.more_menu.actions():
+            action.setToolTip(action.text())
+            action.setStatusTip(action.text())
+        self.more_button.setMenu(self.more_menu)
+        for widget in (self.add_button, self.open_button, self.previous, self.next, self.retry, self.more_button):
             actions.addWidget(widget)
         actions.addStretch(1)
         layout.addLayout(actions)
@@ -194,10 +223,12 @@ class DiscoverPanel(QWidget):
             (self.sort, 'Discover sort', 'Server-side sort for the next explicit search.'),
             (self.results, 'Discover results', 'Arrow keys select a repository; Enter opens it in Browse.'),
             (self.details, 'Repository details', 'Description, classification evidence and unverified metadata. Read only.'),
+            (self.add_button, 'Add to Library', 'Save the selected repository to Unsorted without enabling Auto-Archive.'),
             (self.open_button, 'Open in Browse', 'Scan the selected repository for releases.'),
             (self.previous, 'Previous Discover page', 'Fetch the previous page of the displayed search.'),
             (self.next, 'Next Discover page', 'Fetch the next page of the displayed search.'),
             (self.retry, 'Retry Discover search', 'Retry the last failed, timed out or cancelled search. F5 also retries.'),
+            (self.more_button, 'More repository actions', 'Open on GitHub, copy the repository URL or go to Library. Also available with Menu or Shift+F10 on a result.'),
         )
         self.focus_controls = [widget for widget, _, _ in controls]
         for widget, name, description in controls:
@@ -214,6 +245,7 @@ class DiscoverPanel(QWidget):
         self.results.currentRowChanged.connect(self._selection_changed)
         self.results.itemActivated.connect(lambda *_: self.open_selected())
         self.open_button.clicked.connect(self.open_selected)
+        self.add_button.clicked.connect(self.save_selected)
         self.shortcuts = []
         for key, callback in (('Esc', self.cancel_search), ('F5', self.retry_search)):
             shortcut = QShortcut(QKeySequence(key), self)
@@ -239,6 +271,14 @@ class DiscoverPanel(QWidget):
         self.search.setFocus(Qt.ShortcutFocusReason)
 
     def eventFilter(self, watched, event):
+        if watched is self.results and (
+                (event.type() == QEvent.ContextMenu and event.reason() == QContextMenuEvent.Keyboard)
+                or (event.type() == QEvent.KeyPress and (event.key() == Qt.Key_Menu
+                    or (event.key() == Qt.Key_F10 and event.modifiers() == Qt.ShiftModifier)))):
+            item = self.results.currentItem()
+            if item is not None:
+                self._context_menu(self.results.visualItemRect(item).center())
+            return True
         if (watched is self.search and event.type() == QEvent.KeyPress
                 and event.key() == Qt.Key_Down and self.results.count()):
             if self.results.currentRow() < 0:
@@ -308,8 +348,9 @@ class DiscoverPanel(QWidget):
                 flags = (' · Fork' if record.fork == Tri.YES else '') + (' · Archived' if record.archived == Tri.YES else '')
                 item = QListWidgetItem(f'{record.owner}/{record.name}\n{kinds} · GitHub · {stars} · Last activity: {activity}{flags}')
                 item.setData(Qt.UserRole, record)
+                item.setData(Qt.UserRole + 1, item.text())
                 self.results.addItem(item)
-            self._selection_changed()
+            self.refresh_saved_state()
             messages = [f'{len(self.page.results)} repositories on page {self.page.page}.' if self.page.results else 'No matches. Try another title or category.']
             if self.page.incomplete_results:
                 messages.append('Partial results: GitHub reported an incomplete search. Retry may find more.')
@@ -338,6 +379,13 @@ class DiscoverPanel(QWidget):
             self.cancel.setEnabled(False)
         self.progress.setVisible(active)
         self.open_button.setEnabled(not active and self.results.currentItem() is not None and not self._closed)
+        self.add_button.setEnabled(self.open_button.isEnabled())
+        self.more_button.setEnabled(self.open_button.isEnabled())
+        for action in (self.github_action, self.copy_action):
+            action.setEnabled(self.open_button.isEnabled())
+        saved = not active and not self._closed and self._selected_is_saved()
+        self.library_action.setVisible(saved)
+        self.library_action.setEnabled(saved)
         self.previous.setEnabled(not active and self.page is not None and self.page.page > 1 and not self._closed)
         self.next.setEnabled(not active and self.page is not None and self.page.has_next_page
                              and (self.page.page + 1) * 30 <= MAX_RETRIEVABLE and not self._closed)
@@ -357,17 +405,23 @@ class DiscoverPanel(QWidget):
             self._submit(replace(self.display_snapshot, page=self.page.page + delta))
 
     def _selection_changed(self, *_):
+        if self._closed: return
         item = self.results.currentItem()
         if item is None:
-            self.details.setPlainText('Select a repository to inspect its description and classification evidence.')
+            self._set_details('Select a repository to inspect its description and classification evidence.')
         else:
             record = item.data(Qt.UserRole)
+            try: discovered_repository_url(record)
+            except (ValueError, TypeError):
+                self._set_details('This result has an invalid GitHub repository URL.')
+                self._controls()
+                return
             evidence = []
             for classification in record.classifications:
                 for hint in classification.evidence:
                     source = 'weak name match' if hint.source == EvidenceSource.NAME else hint.source.value
                     evidence.append(f'{classification.kind.value}: {source} — {hint.matched}')
-            self.details.setPlainText(
+            self._set_details(
                 f'{record.owner}/{record.name}\n\n{record.description or "Description: Unknown"}\n\n'
                 'Why matched: title keywords in name, description or topics, plus category terms.\n'
                 'Classification evidence (hints, not authenticity):\n' + ('\n'.join(evidence) or 'None recorded') +
@@ -375,17 +429,100 @@ class DiscoverPanel(QWidget):
                 f'Fork: {record.fork.value}\nArchived: {record.archived.value}\n'
                 'Release availability: Not checked\nOfficial status: Not verified\n'
                 'Original platform: Unknown\nSupported host OS: Unknown\n'
-                'A repository is not necessarily a playable game. Stars do not establish safety.')
+                'A repository is not necessarily a playable game. Stars do not establish safety.' +
+                f'\n\nLibrary: {self._saved_text(record.url) or "Not saved"}')
         self._controls()
+
+    def _set_details(self, text):
+        if self.details.toPlainText() != text:
+            self.details.setPlainText(text)
+
+    def _selected_is_saved(self):
+        item = self.results.currentItem()
+        if item is None: return False
+        try: url = discovered_repository_url(item.data(Qt.UserRole))
+        except (ValueError, TypeError): return False
+        return self.saved_lookup(url) is True
+
+    def _saved_text(self, url):
+        saved = self.saved_lookup(url)
+        return 'Library unavailable' if saved is None else 'In Library' if saved else ''
+
+    def refresh_saved_state(self):
+        """Update existing items in place; never search or rebuild the results list."""
+        if self._closed: return
+        scrollbars = [(bar, bar.value()) for view in (self.results, self.details)
+                      for bar in (view.verticalScrollBar(), view.horizontalScrollBar())]
+        for row in range(self.results.count()):
+            item = self.results.item(row)
+            try: url = discovered_repository_url(item.data(Qt.UserRole))
+            except (ValueError, TypeError): marker = ''
+            else: marker = self._saved_text(url)
+            item.setText(item.data(Qt.UserRole + 1) + (f' · {marker}' if marker else ''))
+        self._selection_changed()
+        for bar, value in scrollbars:
+            bar.setValue(value)
+
+    def save_selected(self):
+        item = self.results.currentItem()
+        if not self._closed and self.add_button.isEnabled() and item is not None:
+            self.save_requested.emit(item.data(Qt.UserRole))
+
+    def show_save_outcome(self, outcome):
+        from .library_panel import SaveDiscoveredOutcome as Outcome
+        if self._closed: return
+        messages = {
+            Outcome.ADDED: 'Added to Library (Unsorted)',
+            Outcome.ALREADY_SAVED: 'Already saved',
+            Outcome.UNAVAILABLE: 'Library unavailable (busy or importing)...',
+            Outcome.READ_ONLY: 'Library is read-only...',
+            Outcome.INVALID: 'Cannot save this result: its GitHub repository URL is invalid.',
+            Outcome.SAVE_FAILED: 'Save failed...',
+        }
+        self.refresh_saved_state()
+        self.show_message(messages[outcome], error=outcome not in (Outcome.ADDED, Outcome.ALREADY_SAVED))
+
+    def _selected_url(self):
+        if self._closed or not self.more_button.isEnabled(): return None
+        item = self.results.currentItem()
+        try: return discovered_repository_url(item.data(Qt.UserRole)) if item else None
+        except (ValueError, TypeError):
+            self.show_message('Cannot open this result: its GitHub repository URL is invalid.', error=True)
+            return None
+
+    def open_on_github(self):
+        url = self._selected_url()
+        if url and not QDesktopServices.openUrl(QUrl(url)):
+            self.show_message('Could not open the browser', error=True)
+
+    def copy_repository_url(self):
+        url = self._selected_url()
+        if url:
+            QApplication.clipboard().setText(url)
+            self.show_message('Copied repository URL')
+
+    def go_to_library(self):
+        if not self._closed and self.library_action.isEnabled() and self._selected_is_saved():
+            self.library_requested.emit()
+
+    def _context_menu(self, pos):
+        if self._closed or self.active_id is not None: return
+        item = self.results.itemAt(pos)
+        if item is None: return
+        if item is not self.results.currentItem(): self.results.setCurrentItem(item)
+        self.more_menu.popup(self.results.viewport().mapToGlobal(pos))
+        return self.more_menu
 
     def open_selected(self):
         item = self.results.currentItem()
-        if self.open_button.isEnabled() and item is not None:
+        if not self._closed and self.open_button.isEnabled() and item is not None:
             self.open_requested.emit(item.data(Qt.UserRole))
 
     def show_message(self, text, *, error=False):
+        if self._closed: return
         self.status.setText(text)
         set_tone(self.status, 'error' if error else 'muted')
+        self._controls()
 
     def disconnect_controller(self):
         if not self._closed:
@@ -394,6 +531,7 @@ class DiscoverPanel(QWidget):
             for shortcut in self.shortcuts:
                 shortcut.setEnabled(False)
             self._closed = True
+            self.more_menu.close()
             self._controls()
 
     def closeEvent(self, event):

@@ -657,11 +657,13 @@ def test_layout_theme_accessibility_and_keyboard_traversal(rig, theme, size, sca
     assert window.size().width() == size[0] and window.size().height() == size[1]
     assert window.property('themeName') == theme
     visible = [panel.search, panel.search_button, panel.category, panel.sort,
-               panel.results, panel.details, panel.open_button, panel.previous, panel.next, panel.retry]
+               panel.results, panel.details, panel.add_button, panel.open_button,
+               panel.previous, panel.next, panel.retry, panel.more_button]
     for widget in visible:
         assert widget.isVisible() and window.rect().contains(bounds(widget, window)), widget.accessibleName()
         assert widget.accessibleName() and widget.accessibleDescription()
-        if widget in (panel.search_button, panel.open_button, panel.previous, panel.next, panel.retry):
+        if widget in (panel.search_button, panel.add_button, panel.open_button,
+                      panel.previous, panel.next, panel.retry, panel.more_button):
             assert widget.width() >= widget.sizeHint().width()
             assert widget.height() >= widget.sizeHint().height()
     for a, b in zip(visible, visible[1:]):
@@ -680,6 +682,8 @@ def test_layout_theme_accessibility_and_keyboard_traversal(rig, theme, size, sca
     QTest.keyClick(panel.results, Qt.Key_Tab)
     assert panel.details.hasFocus()
     QTest.keyClick(panel.details, Qt.Key_Tab)
+    assert panel.add_button.hasFocus()
+    QTest.keyClick(panel.add_button, Qt.Key_Tab)
     assert panel.open_button.hasFocus()
 
 

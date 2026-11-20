@@ -1,5 +1,6 @@
 """Metadata-only repository organization; no scan or queue dependencies."""
 import os
+from enum import Enum, auto
 from concurrent.futures import ThreadPoolExecutor
 from PySide6 import QtWidgets as W
 from PySide6.QtCore import QAbstractTableModel, QEvent, QItemSelectionModel, QSize, Qt, QTimer, QUrl, Signal
@@ -53,6 +54,15 @@ class RepositoryModel(QAbstractTableModel):
 def _prepare_import(path, snapshot):
     plan = t.build_plan(t.read_import_file(path), snapshot)
     return plan, plan.apply(snapshot) if plan.valid else None
+
+
+class SaveDiscoveredOutcome(Enum):
+    ADDED = auto()
+    ALREADY_SAVED = auto()
+    UNAVAILABLE = auto()
+    READ_ONLY = auto()
+    INVALID = auto()
+    SAVE_FAILED = auto()
 
 
 class LibraryPanel(W.QWidget):
@@ -234,10 +244,31 @@ class LibraryPanel(W.QWidget):
         try: candidate = op(self.library)
         except m.LibraryError as exc:
             self._status(reason(exc.code),"error"); return False
-        problem = self.store.save(candidate)
+        try: problem = self.store.save(candidate)
+        except (OSError, RuntimeError): problem = "Could not save library; nothing was saved."
         self._lock()
-        if problem: self._status(problem,"error"); return False
+        if problem is not None: self._status(problem,"error"); return False
         self.library = candidate; self.refresh(); set_tone(self.status,"success"); self.changed.emit(); return True
+
+    def is_saved(self, url):
+        """Look up a provider-qualified identity without reading or writing disk."""
+        if self.busy or self._closed or getattr(self, '_import_preview', False): return None
+        try: identity = m.Repository('github', url).identity
+        except (ValueError, TypeError): return False
+        return any(repo.identity == identity for repo in self.library.repositories)
+
+    def save_discovered(self, url):
+        """Save metadata to Unsorted, independently of the current Library view."""
+        outcome = SaveDiscoveredOutcome
+        if self.busy or self._closed or getattr(self, '_import_preview', False): return outcome.UNAVAILABLE
+        try: repo = m.Repository('github', url)
+        except (ValueError, TypeError): return outcome.INVALID
+        if any(saved.identity == repo.identity for saved in self.library.repositories):
+            return outcome.ALREADY_SAVED
+        if not self.store.writable: return outcome.READ_ONLY
+        if self._transaction(lambda lib: lib.add_repository(repo.url, collection=None)):
+            return outcome.ADDED
+        return outcome.SAVE_FAILED
 
     def _show_auto_detail(self):
         rows=self.table.selectionModel().selectedRows()
@@ -354,6 +385,7 @@ class LibraryPanel(W.QWidget):
         if not path: return
         self._snapshot = self.library; self.busy = True; self._lock(); self._status("Reading import file...")
         self._future = self._worker.submit(_prepare_import, path, self._snapshot); self._poll.start()
+        self.changed.emit()
     def closeEvent(self, event):
         self._closed = True; self._poll.stop(); self._worker.shutdown(wait=False, cancel_futures=True); super().closeEvent(event)
     def hideEvent(self, event):
@@ -364,6 +396,7 @@ class LibraryPanel(W.QWidget):
         self._poll.stop(); self.busy = False
         self._lock()
         if self._closed or not self.window().isVisible(): return
+        self.changed.emit()
         try: plan, candidate = self._future.result(); snapshot = self._snapshot
         except m.LibraryError as exc: self._status("Nothing was imported: " + reason(exc.code),"error"); return
         box = W.QMessageBox(self); box.setWindowTitle("Import preview"); box.setTextFormat(Qt.PlainText)
@@ -374,7 +407,12 @@ class LibraryPanel(W.QWidget):
         box.setDetailedText("\n".join(f"{'Entry ' + str(i) if i else 'File structure'}: {reason(code)}" for i, code in plan.invalid))
         box.addButton(W.QMessageBox.Cancel)
         accept = box.addButton("Import", W.QMessageBox.AcceptRole) if plan.valid else None
-        box.exec()
+        self._import_preview = True
+        self.changed.emit()
+        try: box.exec()
+        finally:
+            self._import_preview = False
+            if not self._closed: self.changed.emit()
         if accept is not None and box.clickedButton() == accept and self._transaction(lambda current: candidate if current is snapshot else plan.apply(current)):
             self._status(f"Added {plan.to_add}, skipped {plan.duplicates} duplicate(s), inactive {plan.inactive}","success")
     def _export(self):

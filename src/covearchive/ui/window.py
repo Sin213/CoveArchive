@@ -21,10 +21,9 @@ from covearchive.archive.naming import validate_root, project_components, releas
 from pathlib import Path
 from covearchive.ui.preferences import PreferenceStore
 from covearchive.ui.library_store import LibraryStore
-from covearchive.ui.library_panel import LibraryPanel
-from covearchive.ui.discover_panel import DiscoverPanel
+from covearchive.ui.library_panel import LibraryPanel, SaveDiscoveredOutcome
+from covearchive.ui.discover_panel import DiscoverPanel, discovered_repository_url
 from covearchive.ui.discover_process import DiscoverController
-from covearchive.discover.models import SearchResult
 from covearchive.queue.store import default_queue_path, QueueError
 from covearchive.ui.branding import app_icon
 from covearchive.ui.archive_bridge import ArchiveBridge, EnqueueRequest, EnqueueItem
@@ -316,6 +315,10 @@ class MainWindow(QMainWindow):
         self.discover_panel = DiscoverPanel(self.discover_controller, self)
         self.tabs.addTab(self.discover_panel, 'Discover')
         self.discover_panel.open_requested.connect(self._open_discovered)
+        self.discover_panel.save_requested.connect(self._save_discovered)
+        self.discover_panel.library_requested.connect(self._discover_library)
+        self.discover_panel.saved_lookup = self.library_panel.is_saved
+        self.library_panel.changed.connect(self.discover_panel.refresh_saved_state)
         self.discover_controller.terminal.connect(self._discover_terminal)
         QApplication.instance().aboutToQuit.connect(self.discover_controller.shutdown)
         self.tabs.tabBar().setAccessibleName("Browse, Queue, Library and Discover tabs"); self.tabs.setAccessibleName("Browse, Queue, Library and Discover"); self.tabs.setAccessibleDescription("Switch between build selection, archive queue, repository library and public repository discovery")
@@ -372,20 +375,30 @@ class MainWindow(QMainWindow):
 
     def _open_discovered(self, result):
         panel = self.discover_panel
+        if self._window_closed or panel._closed: return
         try:
-            if not isinstance(result, SearchResult): raise ValueError
-            target = parse_github_url(result.url)
-            if (target != RepositoryTarget(result.owner, result.name)
-                    or result.url != f'https://github.com/{result.owner}/{result.name}'):
-                raise ValueError
+            url = discovered_repository_url(result)
         except (ValueError, TypeError):
             panel.show_message('Cannot open this result: its GitHub repository URL is invalid.', error=True)
             return
         if self.active_id is not None or self.controller.job is not None:
             panel.show_message('Another Browse scan is running. Wait for it to finish, then open this repository.', error=True)
             return
-        if not self._open_in_browse(result.url):
+        if not self._open_in_browse(url):
             panel.show_message('Browse could not start the release scan. Try again.', error=True)
+
+    def _save_discovered(self, result):
+        panel = self.discover_panel
+        if self._window_closed or panel._closed: return
+        try: url = discovered_repository_url(result)
+        except (ValueError, TypeError):
+            panel.show_save_outcome(SaveDiscoveredOutcome.INVALID)
+            return
+        panel.show_save_outcome(self.library_panel.save_discovered(url))
+
+    def _discover_library(self):
+        if not self._window_closed and not self.discover_panel._closed:
+            self._navigate(2)
 
     def _open_in_browse(self, url):
         if self.active_id is not None or self.controller.job is not None:
@@ -756,6 +769,9 @@ class MainWindow(QMainWindow):
                 self.controller.state_changed.disconnect(self._state); self.controller.terminal.disconnect(self._terminal)
                 self.discover_panel.disconnect_controller()
                 self.discover_panel.open_requested.disconnect(self._open_discovered)
+                self.discover_panel.save_requested.disconnect(self._save_discovered)
+                self.discover_panel.library_requested.disconnect(self._discover_library)
+                self.library_panel.changed.disconnect(self.discover_panel.refresh_saved_state)
                 self.discover_controller.terminal.disconnect(self._discover_terminal)
                 QApplication.instance().aboutToQuit.disconnect(self.controller.shutdown); self.clock.stop()
                 QApplication.instance().aboutToQuit.disconnect(self.auto.shutdown)
