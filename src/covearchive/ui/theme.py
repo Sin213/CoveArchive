@@ -169,6 +169,8 @@ def build_stylesheet(t):
         QTabBar::tab:selected {{ background: {t['card']}; color: {t['text']};
             border-bottom: 2px solid {t['accent']}; padding-bottom: 6px; font-weight: 400; }}
         QTabBar::tab:focus {{ padding: 6px 16px; }}
+        QFrame#topToolbar QTabBar::tab {{ padding-left: 11px; padding-right: 11px; }}
+        QFrame#topToolbar QTabBar::tab:focus {{ padding-left: 10px; padding-right: 10px; }}
         QToolTip {{ background: {t['card']}; color: {t['text']};
             border: 1px solid {t['border']}; padding: 5px; }}
         QProgressBar {{ border: 1px solid {t['border']}; border-radius: 3px;

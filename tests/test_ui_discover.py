@@ -106,8 +106,10 @@ def rig(tmp_path, monkeypatch):
     windows = []
     original_font = QFont(APP.font())
 
-    def make(controller=None, *, scale=1, browse_controller=None):
+    def make(controller=None, *, scale=1, browse_controller=None, font_family=None):
         font = QFont(original_font)
+        if font_family is not None:
+            font.setFamily(font_family)
         font.setPointSizeF(font.pointSizeF() * scale)
         APP.setFont(font)
         discover = controller if controller is not None else FakeController()
@@ -579,10 +581,12 @@ print('quit reaped worker; final close disconnected slots')
 
 @pytest.mark.parametrize('scale', [1, 1.4])
 @pytest.mark.parametrize('queue_count', [0, 100])
-def test_busy_toolbar_fits_minimum_window(rig, scale, queue_count):
+@pytest.mark.parametrize('font_family', [None, 'DejaVu Sans'], ids=['default-font', 'wide-font'])
+def test_busy_toolbar_fits_minimum_window(rig, scale, queue_count, font_family):
     from test_ui_queue import job, view, S
 
-    window, panel, controller = rig(scale=scale)
+    # DejaVu Sans reproduces the wider fontconfig default on the Ubuntu runner.
+    window, panel, controller = rig(scale=scale, font_family=font_family)
     window.bridge.view_changed.emit(view(1, tuple(job(S.QUEUED, job_id=str(i)) for i in range(queue_count))))
     APP.processEvents()
     assert window._queue_count == queue_count
