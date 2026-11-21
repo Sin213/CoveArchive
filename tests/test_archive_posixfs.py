@@ -1,5 +1,6 @@
 """Real Linux filesystem and process exclusion evidence (no network required)."""
 from dataclasses import replace
+from contextlib import contextmanager
 import errno
 import hashlib
 import os
@@ -46,6 +47,104 @@ def test_backend_and_error_identity():
     assert store.ArchiveRoot is fs.ArchiveRoot
     assert fs.ArchiveError is winfs.ArchiveError
     assert fs._component is winfs._component
+
+
+def test_bounded_names_stops_iterator_and_default_stays_full(tmp_path, monkeypatch):
+    for number in range(10_000):
+        (tmp_path / f"entry-{number:05}").touch()
+    original = os.scandir
+    enumerated = 0
+    @contextmanager
+    def scandir(*args, **kwargs):
+        with original(*args, **kwargs) as entries:
+            def counted():
+                nonlocal enumerated
+                for entry in entries:
+                    enumerated += 1
+                    yield entry
+            yield counted()
+    monkeypatch.setattr(os, "scandir", scandir)
+    with fs.ArchiveRoot.open(str(tmp_path)) as root:
+        assert len(root.names()) == 10_000
+        assert len(root.names(limit=1)) == 2 and enumerated == 2
+        assert len(root.names(limit=0)) == 1 and enumerated == 3
+        assert len(root.names()) == 10_000
+
+
+@pytest.mark.parametrize("limit", [-1, True, 1.5])
+def test_bounded_names_rejects_invalid_limits(tmp_path, limit):
+    with fs.ArchiveRoot.open(str(tmp_path)) as root:
+        with pytest.raises(ValueError):
+            root.names(limit=limit)
+        with pytest.raises(ValueError):
+            root.open_dir("Owner", fold_case=True, entry_limit=limit)
+
+
+def test_bounded_folded_lookup_requires_complete_alias_scan(tmp_path):
+    (tmp_path / "Owner").mkdir()
+    (tmp_path / "Other").mkdir()
+    with fs.ArchiveRoot.open(str(tmp_path)) as root:
+        with pytest.raises(fs.ArchiveError, match="^limit$"):
+            root.open_dir("Owner", fold_case=True, entry_limit=1, wait=False)
+        with root.open_dir("OWNER", fold_case=True, entry_limit=2, wait=False) as owner:
+            assert owner.name == "Owner" and owner.lookup_entries == 2
+        with pytest.raises(fs.ArchiveError, match="^missing") as error:
+            root.open_dir("Missing", fold_case=True, entry_limit=2, wait=False)
+        assert error.value.lookup_entries == 2
+        assert not root._children
+
+
+def test_strict_links_avoids_recovery_scan_and_default_retains_temp_alias(tmp_path, monkeypatch):
+    (tmp_path / "asset.bin").write_bytes(DATA)
+    os.link(tmp_path / "asset.bin", tmp_path / (".covearchive-tmp-" + "a" * 32 + ".part"))
+    with fs.ArchiveRoot.open(str(tmp_path)) as root:
+        with root.open_file("asset.bin") as file:
+            assert file.info().links == 1 and file.read() == DATA
+        monkeypatch.setattr(os, "listdir", lambda *args: pytest.fail("strict verification scanned recovery aliases"))
+        with pytest.raises(fs.ArchiveUnsafePathError, match="^multiple_links$"):
+            root.open_file("asset.bin", strict_links=True)
+        assert not root._children
+
+
+def test_strict_links_remains_strict_when_alias_added_after_open(tmp_path, monkeypatch):
+    (tmp_path / "asset.bin").write_bytes(DATA)
+    with fs.ArchiveRoot.open(str(tmp_path)) as root, root.open_file("asset.bin", strict_links=True) as file:
+        os.link(tmp_path / "asset.bin", tmp_path / (".covearchive-tmp-" + "b" * 32 + ".part"))
+        monkeypatch.setattr(os, "listdir", lambda *args: pytest.fail("strict info scanned recovery aliases"))
+        with pytest.raises(fs.ArchiveUnsafePathError, match="^multiple_links$"):
+            file.info()
+
+
+def test_folded_lookup_default_remains_blocking_with_real_lock_holder(tmp_path):
+    (tmp_path / "Owner").mkdir()
+    holder = child("""
+        import fcntl,os
+        fd=os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY)
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        print('locked',flush=True); sys.stdin.readline()
+    """, tmp_path, stdin=subprocess.PIPE)
+    opener = None
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        opener = child("""
+            import fcntl
+            from covearchive.archive import posixfs as fs
+            original=fcntl.flock
+            def flock(fd,flags):
+                print(flags,flush=True); return original(fd,flags)
+            fcntl.flock=flock
+            with fs.ArchiveRoot.open(sys.argv[1]) as root:
+                with root.open_dir('Owner',fold_case=True) as owner: print(owner.name,flush=True)
+        """, tmp_path)
+        import fcntl
+        assert opener.stdout.readline().strip() == str(fcntl.LOCK_EX)
+        assert opener.poll() is None
+        holder.communicate("release\n", timeout=3)
+        assert result(opener) == "Owner"
+    finally:
+        for process in (opener, holder):
+            if process is not None and process.poll() is None:
+                process.kill(); process.wait(timeout=3)
 
 
 @pytest.mark.parametrize("position", ["root", "directory", "file", "lock", "temp"])

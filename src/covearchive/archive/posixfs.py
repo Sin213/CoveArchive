@@ -57,11 +57,13 @@ def _error(exc):
     raise ArchiveError("os", status=exc.errno) from exc
 
 
-def _verify_type(fd, directory=False, *, parent_fd=None, name=None):
+def _verify_type(fd, directory=False, *, parent_fd=None, name=None, strict_links=False):
     info = os.fstat(fd)
     if not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)):
         raise ArchiveUnsafePathError("not_regular_file")
     if not directory and info.st_nlink != 1:
+        if strict_links:
+            raise ArchiveUnsafePathError("multiple_links")
         if (info.st_nlink != 2 or parent_fd is None or name is None
                 or not (TEMP_PATTERN.fullmatch(name) or _temp_sibling(parent_fd, name, info))):
             # A publisher/recovery process may have removed its temp alias
@@ -199,7 +201,8 @@ class Handle:
 
     def info(self):
         info = _verify_type(self._get(), isinstance(self, Directory),
-                            parent_fd=self.parent._get() if self.parent is not None else None, name=self.name)
+                            parent_fd=self.parent._get() if self.parent is not None else None, name=self.name,
+                            strict_links=getattr(self, "_strict_links", False))
         # The shared engine counts external aliases. A validated recovery temp
         # is not an external alias; raw fstat still exposes both native links.
         links = (1 if info.st_nlink == 2 and not isinstance(self, Directory)
@@ -312,7 +315,7 @@ class Handle:
 class Directory(Handle):
     role = "archive"
 
-    def _open(self, name, *, directory=False, create=False, temporary=False, metadata=False):
+    def _open(self, name, *, directory=False, create=False, temporary=False, metadata=False, strict_links=False):
         _component(name, metadata=metadata, temporary=temporary, role=self.role, directory=directory)
         parent_fd = self._get()
         flags = _FLAGS | (os.O_DIRECTORY if directory else os.O_RDONLY)
@@ -328,13 +331,15 @@ class Directory(Handle):
         except OSError as exc:
             _error(exc)
         try:
-            _verify_type(fd, directory, parent_fd=parent_fd, name=name)
+            _verify_type(fd, directory, parent_fd=parent_fd, name=name, strict_links=strict_links)
             if temporary:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError as exc:
                     raise ArchiveBusyError("busy") from exc
             opened = (Directory if directory else Handle)(fd, parent=self, name=name)
+            if strict_links:
+                opened._strict_links = True
         except BaseException:
             os.close(fd)
             raise
@@ -346,24 +351,49 @@ class Directory(Handle):
             opened.close()
             raise
 
-    def open_dir(self, name, *, create=False, fold_case=False):
+    def open_dir(self, name, *, create=False, fold_case=False, entry_limit=None, wait=True):
+        """Open a child; defaults preserve full case scanning and blocking flock.
+
+        With entry_limit, case lookup examines at most that many names plus one
+        overflow lookahead. Truncation raises limit even if a match was seen:
+        unseen aliases cannot be ruled out. The returned child (or ArchiveError)
+        exposes lookup_entries for shared-budget accounting. wait=False reports
+        busy immediately when the parent directory's advisory lock is held.
+        """
+        if entry_limit is not None and (type(entry_limit) is not int or entry_limit < 0):
+            raise ValueError("entry_limit must be a nonnegative integer or None")
         if not fold_case:
             return self._open(name, directory=True, create=create)
         _component(name, directory=True)
         lock_fd = None
+        lookup_entries = 0
         try:
             # A fresh open description prevents unlocking any ancestor handle's
             # flock. This short critical section never nests directory locks.
             lock_fd = os.open(".", _FLAGS | os.O_DIRECTORY, dir_fd=self._get())
             _verify_type(lock_fd, True)
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+            except BlockingIOError as exc:
+                raise ArchiveBusyError("busy") from exc
             if name.isascii():
-                matches = [entry for entry in self.names() if entry.isascii() and entry.casefold() == name.casefold()]
+                entries = self.names() if entry_limit is None else self.names(limit=entry_limit)
+                lookup_entries = len(entries) if entry_limit is None else min(len(entries), entry_limit)
+                if entry_limit is not None and len(entries) > entry_limit:
+                    raise ArchiveError("limit")
+                matches = [entry for entry in entries if entry.isascii() and entry.casefold() == name.casefold()]
                 if len(matches) > 1:
                     raise ArchiveConflictError("case_alias")
                 if matches:
                     name = matches[0]
-            return self._open(name, directory=True, create=create)
+            opened = self._open(name, directory=True, create=create)
+            if entry_limit is not None:
+                opened.lookup_entries = lookup_entries
+            return opened
+        except ArchiveError as exc:
+            if entry_limit is not None:
+                exc.lookup_entries = lookup_entries
+            raise
         except OSError as exc:
             _error(exc)
         finally:
@@ -371,8 +401,13 @@ class Directory(Handle):
                 # Closing this dedicated fd releases flock, including on errors.
                 os.close(lock_fd)
 
-    def open_file(self, name, *, metadata=False, delete=False, hold=False):
-        return self._open(name, metadata=metadata)
+    def open_file(self, name, *, metadata=False, delete=False, hold=False, strict_links=False):
+        """Read a file; strict_links rejects aliases without a recovery scan.
+
+        The default retains recognition of owned recovery-temp siblings. Audit
+        handles require a single link at open and at every subsequent info().
+        """
+        return self._open(name, metadata=metadata, strict_links=strict_links)
 
     def create_temp(self, *, token=None):
         token = uuid.uuid4().hex if token is None else token
@@ -407,9 +442,29 @@ class Directory(Handle):
             opened.close()
             raise
 
-    def names(self):
+    def names(self, *, limit=None):
+        """Return names in filesystem order; default remains the full listing.
+
+        A nonnegative limit stops enumeration after at most limit+1 names. The
+        extra name indicates overflow. A fresh pinned directory description
+        gives every bounded call its own cursor without reopening a disk path.
+        """
+        if limit is not None and (type(limit) is not int or limit < 0):
+            raise ValueError("limit must be a nonnegative integer or None")
         try:
-            return tuple(os.listdir(self._get()))
+            if limit is None:
+                return tuple(os.listdir(self._get()))
+            scan_fd = os.open(".", _FLAGS | os.O_DIRECTORY, dir_fd=self._get())
+            try:
+                result = []
+                with os.scandir(scan_fd) as entries:
+                    for entry in entries:
+                        result.append(entry.name)
+                        if len(result) > limit:
+                            break
+                return tuple(result)
+            finally:
+                os.close(scan_fd)
         except OSError as exc:
             _error(exc)
 

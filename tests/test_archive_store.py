@@ -24,6 +24,23 @@ def record(**changes):
     return replace(AssetRecord(1, "asset", "asset.bin", len(DATA), None, None, "planned"), **changes)
 
 
+def test_directory_bounded_options_are_exposed_with_unchanged_defaults(tmp_path):
+    import inspect
+    (tmp_path / "Owner").mkdir()
+    (tmp_path / "Other").mkdir()
+    with store.ArchiveRoot.open(str(tmp_path)) as root:
+        assert set(root.names()) == {"Owner", "Other"}
+        assert len(root.names(limit=1)) == 2
+        with root.open_dir("OWNER", fold_case=True) as owner:
+            assert owner.name == "Owner"
+        with root.open_dir("OWNER", fold_case=True, wait=False, entry_limit=2) as owner:
+            assert owner.name == "Owner" and owner.lookup_entries == 2
+        assert set(root.names()) == {"Owner", "Other"}
+    parameters = inspect.signature(store.Directory.open_dir).parameters
+    assert parameters["wait"].default is True
+    assert parameters["entry_limit"].default is None
+
+
 def test_codeberg_component_chain_from_pinned_root():
     from contextlib import contextmanager
     calls=[]

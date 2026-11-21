@@ -3,12 +3,75 @@ import ctypes
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
 from covearchive.archive import winfs
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="requires Windows NTFS handles")
+
+
+def test_bounded_names_uses_single_entry_queries_and_default_stays_full(tmp_path, monkeypatch):
+    for number in range(10_000):
+        (tmp_path / f"entry-{number:05}").touch()
+    original = winfs._ntdirectory
+    queries = []
+    def query(*args):
+        queries.append(bool(args[8]))
+        return original(*args)
+    monkeypatch.setattr(winfs, "_ntdirectory", query)
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        assert len(root.names()) == 10_000 and not any(queries)
+        queries.clear()
+        assert len(root.names(limit=1)) == 2
+        assert all(queries) and len(queries) <= 4  # at most two dot entries plus two real entries
+        assert len(root.names(limit=0)) == 1
+        assert len(root.names()) == 10_000
+
+
+@pytest.mark.parametrize("limit", [-1, True, 1.5])
+def test_bounded_names_rejects_invalid_limits(tmp_path, limit):
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with pytest.raises(ValueError):
+            root.names(limit=limit)
+        with pytest.raises(ValueError):
+            root.open_dir("Owner", fold_case=True, entry_limit=limit)
+
+
+def test_bounded_folded_lookup_requires_complete_alias_scan(tmp_path):
+    (tmp_path / "Owner").mkdir()
+    (tmp_path / "Other").mkdir()
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with pytest.raises(winfs.ArchiveError, match="^limit$"):
+            root.open_dir("Owner", fold_case=True, entry_limit=1, wait=False)
+        with root.open_dir("OWNER", fold_case=True, entry_limit=2, wait=False) as owner:
+            assert owner.name == "Owner" and owner.lookup_entries == 2
+        with pytest.raises(winfs.ArchiveError, match="^missing") as error:
+            root.open_dir("Missing", fold_case=True, entry_limit=2, wait=False)
+        assert error.value.lookup_entries == 2 and not root._children
+
+
+def test_wait_false_and_default_both_fail_busy_without_waiting_for_sharing(tmp_path):
+    (tmp_path / "Owner").mkdir()
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with root._open("Owner", directory=True, access=0x100081, share=0):
+            for options in ({}, {"wait": False, "entry_limit": 10}):
+                start = time.monotonic()
+                with pytest.raises(winfs.ArchiveBusyError, match="busy"):
+                    root.open_dir("Owner", fold_case=True, **options)
+                assert time.monotonic() - start < 2
+
+
+def test_strict_links_refuses_alias_and_default_link_query_is_unchanged(tmp_path):
+    (tmp_path / "asset.bin").write_bytes(b"payload")
+    os.link(tmp_path / "asset.bin", tmp_path / "alias.bin")
+    with winfs.ArchiveRoot.open(str(tmp_path)) as root:
+        with root.open_file("asset.bin") as file:
+            assert file.info().links == 2
+        with pytest.raises(winfs.ArchiveUnsafePathError, match="^multiple_links$"):
+            root.open_file("asset.bin", strict_links=True)
+        assert not root._children
 
 
 def test_pinned_root_and_child(tmp_path):

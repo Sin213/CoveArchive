@@ -300,22 +300,57 @@ class Directory(Handle):
             opened.close()
             raise
 
-    def open_dir(self, name, *, create=False, fold_case=False):
-        if fold_case:
-            _component(name, directory=True)
-            if name.isascii():
-                matches = [entry for entry in self.names()
-                           if entry.isascii() and entry.casefold() == name.casefold()]
-                if len(matches) > 1:
-                    raise ArchiveConflictError("case_alias")
-                if matches:
-                    name = matches[0]
-        return self._open(name, directory=True, disposition=3 if create else 1,
-                          access=0x100081, share=3)
+    def open_dir(self, name, *, create=False, fold_case=False, entry_limit=None, wait=True):
+        """Open a child; default full case scanning and sharing stay unchanged.
 
-    def open_file(self, name, *, metadata=False, delete=False, hold=False):
-        return self._open(name, metadata=metadata, share=5 if hold else 1,
-                          access=_READ | _SYNC | (_DELETE if delete or hold else 0))
+        entry_limit bounds lookup with one overflow lookahead; incomplete alias
+        scans raise limit. Bounded children/errors expose lookup_entries for
+        shared-budget accounting. wait is accepted for backend parity: NT sharing
+        conflicts already fail immediately as busy for either value, without a
+        blocking advisory lock or retry. No new Windows locking is introduced.
+        """
+        if entry_limit is not None and (type(entry_limit) is not int or entry_limit < 0):
+            raise ValueError("entry_limit must be a nonnegative integer or None")
+        lookup_entries = 0
+        try:
+            if fold_case:
+                _component(name, directory=True)
+                if name.isascii():
+                    entries = self.names() if entry_limit is None else self.names(limit=entry_limit)
+                    lookup_entries = len(entries) if entry_limit is None else min(len(entries), entry_limit)
+                    if entry_limit is not None and len(entries) > entry_limit:
+                        raise ArchiveError("limit")
+                    matches = [entry for entry in entries
+                               if entry.isascii() and entry.casefold() == name.casefold()]
+                    if len(matches) > 1:
+                        raise ArchiveConflictError("case_alias")
+                    if matches:
+                        name = matches[0]
+            opened = self._open(name, directory=True, disposition=3 if create else 1,
+                                access=0x100081, share=3)
+            if entry_limit is not None:
+                opened.lookup_entries = lookup_entries
+            return opened
+        except ArchiveError as exc:
+            if entry_limit is not None:
+                exc.lookup_entries = lookup_entries
+            raise
+
+    def open_file(self, name, *, metadata=False, delete=False, hold=False, strict_links=False):
+        """Read a file, optionally requiring a single link before returning it.
+
+        Windows info() never scans for recovery aliases; subsequent verification
+        still checks link count. Default sharing and link behavior are unchanged.
+        """
+        opened = self._open(name, metadata=metadata, share=5 if hold else 1,
+                            access=_READ | _SYNC | (_DELETE if delete or hold else 0))
+        try:
+            if strict_links and opened.info().links != 1:
+                raise ArchiveUnsafePathError("multiple_links")
+            return opened
+        except BaseException:
+            opened.close()
+            raise
 
     def create_temp(self, *, token=None):
         token = uuid.uuid4().hex if token is None else token
@@ -355,12 +390,20 @@ class Directory(Handle):
             opened.close()
             raise
 
-    def names(self):
+    def names(self, *, limit=None):
+        """Filesystem-order names; default retains full batched enumeration.
+
+        With a nonnegative limit, request single native entries and stop after
+        at most limit+1 names (excluding dot entries). Restart on every call.
+        The extra name is an overflow signal, not a complete directory snapshot.
+        """
+        if limit is not None and (type(limit) is not int or limit < 0):
+            raise ValueError("limit must be a nonnegative integer or None")
         result, restart = [], True
         while True:
             data, io = C.create_string_buffer(65536), _IO()
             status = _ntdirectory(self._get(), None, None, None, C.byref(io), data,
-                                  len(data), 12, False, None, restart)
+                                  len(data), 12, limit is not None, None, restart)
             restart = False
             if status & 0xffffffff == 0x80000006:
                 return tuple(result)
@@ -372,6 +415,8 @@ class Directory(Handle):
                 name = data.raw[offset + 12:offset + 12 + length].decode("utf-16-le", "surrogatepass")
                 if name not in (".", ".."):
                     result.append(name)
+                    if limit is not None and len(result) > limit:
+                        return tuple(result)
                 if not next_offset:
                     break
                 offset += next_offset
