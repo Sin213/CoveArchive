@@ -82,7 +82,21 @@ class VerifiedAsset:
 
 
 @dataclass(frozen=True)
+class IndexedRelease:
+    release_id: int | str
+    tag: str
+    folder: str
+    asset_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class HealthReport:
+    """indexed is the full repository-matched registry, before audit limits.
+
+    None means no trusted matching index was loaded; an empty tuple means a
+    matching index was loaded and contains no releases. It is metadata, not
+    evidence that any asset bytes have been verified.
+    """
     repository: RepositoryTarget
     status: str
     counts: CategoryCounts
@@ -91,6 +105,7 @@ class HealthReport:
     complete: bool
     truncated: bool
     limits: AuditLimits
+    indexed: tuple[IndexedRelease, ...] | None = None
 
 
 # Never expose exception text or an unrecognized archive-layer code.
@@ -167,6 +182,7 @@ class _Audit:
         self.counts = {f.name: 0 for f in fields(CategoryCounts)}
         self.findings: list[Finding] = []
         self.verified: list[VerifiedAsset] = []
+        self.index_records: tuple[IndexedRelease, ...] | None = None
         self.complete, self.truncated, self.findings_capped = True, False, False
         self.metadata_used = self.bytes_reserved = self.entries_used = 0
         self.releases_used = self.assets_used = 0
@@ -362,6 +378,9 @@ class _Audit:
                 self.complete = False
                 self.add("identity_mismatch")
                 return
+            self.index_records = tuple(IndexedRelease(r.release_id, r.tag, r.folder,
+                                                      tuple(a.asset_id for a in r.assets))
+                                       for r in index.releases)
             self.indexed(project, index)
         self.scan(project, index)
 
@@ -370,7 +389,8 @@ class _Audit:
         status = ("attention" if any((counts.missing, counts.damaged, counts.unsafe, counts.untrusted))
                   else "unverified" if counts.unverified or not self.complete else "healthy")
         return HealthReport(self.repository, status, counts, tuple(self.findings),
-                            tuple(self.verified), self.complete, self.truncated, self.limits)
+                            tuple(self.verified), self.complete, self.truncated, self.limits,
+                            self.index_records)
 
 
 def audit_project(root_path: str, repository: RepositoryTarget,

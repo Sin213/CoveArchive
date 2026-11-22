@@ -16,8 +16,8 @@
 
 | Slice | Scope | Dependencies | State |
 | --- | --- | --- | --- |
-| CA-N1a | Read-only archive health audit (foundation) | — | IN PROGRESS |
-| CA-N1b | Repository health/availability checks and latest-vs-archived comparison | N1a | PLANNED |
+| CA-N1a | Read-only archive health audit (foundation) | — | COMPLETE |
+| CA-N1b | Repository health/availability checks and latest-vs-archived comparison | N1a | IN PROGRESS |
 | CA-N1c | Health Dashboard + Check All/Update All | N1a, N1b | PLANNED |
 | CA-N2a | Scheduled preservation runner | N1a | PLANNED |
 | CA-N3a | Incremental Git mirrors | — | PLANNED |
@@ -65,6 +65,20 @@ the default filesystem APIs retain recovery-alias behavior for existing callers.
 Verification is evidence at a point in time: same-uid in-place TOCTOU races remain
 possible. The shared filesystem abstraction supports Windows; native Windows
 verification has not been performed for this slice.
+
+## N1b detection contract
+
+`covearchive.archive.availability.assess(repository, scan_result, report)` is a
+pure, Qt-free status projection for one selected GitHub repository.
+`check_repository(root_path, repository, ...)` combines a bounded anonymous scan
+with the read-only N1a audit, including when upstream fails. It is synchronous
+and must run off the GUI thread; N1c uses ScanController for hard deadlines.
+Stable and prerelease lines rank timezone-aware publication dates independently.
+Only matching release IDs, tags, asset IDs, sizes, and hashed bytes can establish
+verified status; incomplete evidence cannot prove absence. Unsupported providers,
+ambiguous listings, reused tags, transient errors, and unavailable archives have
+explicit states. Prereleases never drive the headline. No downloads, archive
+mutation, credentials, queue, Library, scheduling, or dashboard are introduced.
 
 ## Feature references
 
