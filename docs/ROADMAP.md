@@ -17,8 +17,8 @@
 | Slice | Scope | Dependencies | State |
 | --- | --- | --- | --- |
 | CA-N1a | Read-only archive health audit (foundation) | — | COMPLETE |
-| CA-N1b | Repository health/availability checks and latest-vs-archived comparison | N1a | IN PROGRESS |
-| CA-N1c | Health Dashboard + Check All/Update All | N1a, N1b | PLANNED |
+| CA-N1b | Repository health/availability checks and latest-vs-archived comparison | N1a | COMPLETE |
+| CA-N1c | Health Dashboard + Check All/Update All | N1a, N1b | IN PROGRESS |
 | CA-N2a | Scheduled preservation runner | N1a | PLANNED |
 | CA-N3a | Incremental Git mirrors | — | PLANNED |
 | CA-N3b | Repository relocation history | N3a | PLANNED |
@@ -79,6 +79,35 @@ verified status; incomplete evidence cannot prove absence. Unsupported providers
 ambiguous listings, reused tags, transient errors, and unavailable archives have
 explicit states. Prereleases never drive the headline. No downloads, archive
 mutation, credentials, queue, Library, scheduling, or dashboard are introduced.
+
+## N1c dashboard contract (in progress)
+
+Library's Health view runs only on explicit Check Selected / Check All. Each
+repository uses one anonymous, supervised `--health-worker` process for the N1b
+scan and N1a read-only audit, with a hard deadline, cancellation and reaping.
+The bounded v2 protocol sends safe status and asset identity/hash fields, never actionable catalogs,
+download URLs, credentials, publisher titles/bodies or exception text. Results
+and last-known release tags are session-only and provider-qualified. Check All
+is sequential and stops at a rate limit; cancellation retains completed results.
+Checks and review preparation never modify the Library, queue or archive.
+
+Review Updates / Update All offers checkboxes only for confidently identified new
+or partially archived releases with saved rules and a valid chosen destination.
+Changed metadata, reused tags, damaged/missing files and inconclusive evidence
+remain excluded, with explanations and Open in Browse. Queue Selected prepares
+repositories sequentially using an anonymous supervised scan for current catalog
+metadata followed by a fresh Health check. A second bounded read-only audit in
+that Health child obtains verified asset IDs; if its evidence differs from the
+first audit, preparation fails closed. Verified local assets are omitted.
+
+Only after preparation does a separate confirmation allow ArchiveBridge queue
+insertion, with saved format/filename rules and `requeue_completed=False`.
+Identities, Library membership, current health evidence, rules and metadata are
+revalidated; stale or expired preparations are skipped. Process deadlines and a
+five-minute preparation budget bound work. Cancellation before confirmation
+queues nothing; stopping submissions retains jobs already explicitly submitted.
+Checks never enable Auto-Archive or repair/replace preserved data. N1c remains
+IN PROGRESS pending final review and validation; no later slice is started.
 
 ## Feature references
 

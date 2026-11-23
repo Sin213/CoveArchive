@@ -45,6 +45,8 @@ class Job:
 
 
 class ScanController(QObject):
+    @property
+    def response_limit(self): return MAX_RESPONSE_BYTES
     state_changed = Signal(str, str)
     terminal = Signal(str, str, object)
 
@@ -66,7 +68,7 @@ class ScanController(QObject):
                 candidate = self.auth.token()
                 if valid_token(candidate): token = candidate
         except ValueError: pass
-        request = encode_request_with_token(request_id, url, token)
+        request = self._encode_request(request_id, url, token)
         process = QProcess(self)
         if sys.platform == "linux":
             # Qt's Unix CreateNewSession is the start_new_session equivalent.
@@ -105,7 +107,7 @@ class ScanController(QObject):
         if self.job is not job: return
         chunk = bytes(job.process.readAllStandardOutput())
         if not job.reason:
-            if len(job.output) + len(chunk) > MAX_RESPONSE_BYTES:
+            if len(job.output) + len(chunk) > self.response_limit:
                 job.failure = ScanFailure(job.request_id, "protocol", message="Response too large.")
                 self._stop(job, "FAILED")
                 if self.job is not job: return
@@ -172,7 +174,7 @@ class ScanController(QObject):
                 else:
                     output = bytes(job.output)
                     if job.token_sent: output = output.replace(job.token_sent.encode('ascii'), b'[redacted]')
-                    result = decode_response(output, job.request_id)
+                    result = self._decode_response(output, job.request_id)
                 state = "FAILED" if isinstance(result, ScanFailure) else "COMPLETED"
             except ProtocolError:
                 state, result = "FAILED", ScanFailure(job.request_id, "protocol", message="Invalid worker response.")
@@ -201,6 +203,12 @@ class ScanController(QObject):
         job.token_sent = None
         self.job = None
         self.terminal.emit(job.request_id, state, result)
+
+    def _encode_request(self, request_id, url, token):
+        return encode_request_with_token(request_id, url, token)
+
+    def _decode_response(self, output, request_id):
+        return decode_response(output, request_id)
 
     def shutdown(self, timeout_ms=3000):
         job = self.job

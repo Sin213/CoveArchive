@@ -1,4 +1,4 @@
-"""Metadata-only repository organization; no scan or queue dependencies."""
+"""Repository collections and a user-initiated, detection-only Health view."""
 import os
 from enum import Enum, auto
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +10,8 @@ from covearchive.ui.library_store import atomic_write
 from covearchive.auto_archive import NEEDS_RULES
 from covearchive.ui.theme import set_role, set_tone, current_tokens
 from covearchive.ui.queue_panel import _safe, _safe_lines
+from covearchive.ui.health_panel import HealthPanel
+from covearchive.ui.health_process import HealthController
 
 
 def reason(code):
@@ -68,7 +70,9 @@ class SaveDiscoveredOutcome(Enum):
 class LibraryPanel(W.QWidget):
     changed=Signal()
     open_requested=Signal(str)
-    def __init__(self, store, parent=None, protected=lambda: (), auto=None):
+    def __init__(self, store, parent=None, protected=lambda: (), auto=None, *, health_controller=None,
+                 archive_root=lambda: '', health_settings=lambda: {}, launcher=None, bridge=None,
+                 health_update_check=None, health_update_scan=None):
         super().__init__(parent)
         self.protected = protected; self.auto=auto
         self.store = store; self.library, _, _ = store.load(); self.scope = None
@@ -92,8 +96,15 @@ class LibraryPanel(W.QWidget):
         self.import_button = button("Import...", self._import, top)
         self.export_button = button("Export...", self._export, top, False)
         set_role(self.add,"primary")
-        self.search = W.QLineEdit(); self.search.setClearButtonEnabled(True); self.search.setPlaceholderText("Search repositories"); toolbar_layout.addWidget(self.search)
-        body = W.QHBoxLayout(); layout.addLayout(body, 1)
+        view_row=W.QHBoxLayout(); toolbar_layout.addLayout(view_row)
+        self.view_selector=W.QComboBox(); self.view_selector.addItems(['Collections','Health'])
+        self.view_selector.setAccessibleName('Library view'); self.view_selector.setAccessibleDescription('Switch between Collections and Health')
+        view_row.addWidget(self.view_selector)
+        self.search = W.QLineEdit(); self.search.setClearButtonEnabled(True); self.search.setPlaceholderText("Search repositories"); view_row.addWidget(self.search,1)
+        self.views=W.QStackedWidget(); layout.addWidget(self.views,1)
+        collections=W.QWidget(); self.views.addWidget(collections)
+        collections_layout=W.QVBoxLayout(collections); collections_layout.setContentsMargins(0,0,0,0); collections_layout.setSpacing(5)
+        body = W.QHBoxLayout(); collections_layout.addLayout(body, 1)
         # Leave room for the identifying columns with wider native delegates.
         left_card,right_card=W.QFrame(),W.QFrame()
         body.addWidget(left_card,2); body.addWidget(right_card,8)
@@ -131,11 +142,19 @@ class LibraryPanel(W.QWidget):
         self.open_button=button('Open in Browse',self._open_in_browse,actions,False)
         actions.addStretch()
         for value in (self.delete, self.remove): set_role(value, 'danger')
-        auto_frame=W.QFrame(); auto_frame.setFrameShape(W.QFrame.StyledPanel); auto_frame.setProperty("section","card"); layout.addWidget(auto_frame)
+        auto_frame=W.QFrame(); auto_frame.setFrameShape(W.QFrame.StyledPanel); auto_frame.setProperty("section","card"); collections_layout.addWidget(auto_frame)
         auto_layout=W.QVBoxLayout(auto_frame); auto_layout.setContentsMargins(7,4,7,4); auto_layout.setSpacing(0)
         self.auto_detail=W.QLabel(); self.auto_detail.setTextFormat(Qt.PlainText); self.auto_detail.setWordWrap(True); auto_layout.addWidget(self.auto_detail)
         self.auto_placeholder=W.QLabel("Select a repository to see Auto-Archive details.")
         self.auto_placeholder.setTextFormat(Qt.PlainText); set_tone(self.auto_placeholder,"muted"); auto_layout.addWidget(self.auto_placeholder)
+        self.health=HealthPanel(lambda:self.library,
+            health_controller if health_controller is not None else HealthController(launcher,parent=self),
+            archive_root,health_settings,self,update_check=health_update_check,update_scan=health_update_scan,
+            bridge=bridge,launcher=launcher)
+        self.views.addWidget(self.health); self.view_selector.currentIndexChanged.connect(self.views.setCurrentIndex)
+        self.view_selector.currentIndexChanged.connect(lambda index:self.search.setEnabled(index==0))
+        self.health.open_requested.connect(self.open_requested)
+        self.changed.connect(self.health.sync)
         self.status = W.QLabel(); self.status.setTextFormat(Qt.PlainText); self.status.setWordWrap(True); layout.addWidget(self.status)
         for label in (self.status,self.auto_detail): label.setSizePolicy(W.QSizePolicy.Ignored,W.QSizePolicy.Preferred)
         set_tone(self.status,"muted")
@@ -332,7 +351,7 @@ class LibraryPanel(W.QWidget):
 
     def _scope(self, current, previous):
         self.scope = current.data(0, Qt.UserRole) if current else None; self._filter()
-    def _filter(self): self.model.set_rows(self.library, self.library.browse(self.scope, search=self.search.text())); self._lock(); self._show_auto_detail()
+    def _filter(self): self.model.set_rows(self.library, self.library.browse(self.scope, search=self.search.text())); self._lock(); self._show_auto_detail(); self.health.sync()
     def _selected(self): return [self.model.rows[i.row()].identity for i in self.table.selectionModel().selectedRows()]
     def _add(self, checked=False, *, text=None):
         if not self.store.writable: return
@@ -387,6 +406,7 @@ class LibraryPanel(W.QWidget):
         self._future = self._worker.submit(_prepare_import, path, self._snapshot); self._poll.start()
         self.changed.emit()
     def closeEvent(self, event):
+        if not self.health.shutdown(): event.ignore(); return
         self._closed = True; self._poll.stop(); self._worker.shutdown(wait=False, cancel_futures=True); super().closeEvent(event)
     def hideEvent(self, event):
         if self.busy and not self.window().isVisible(): self._closed = True; self._poll.stop(); self._worker.shutdown(wait=False, cancel_futures=True)

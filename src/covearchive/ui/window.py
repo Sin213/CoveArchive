@@ -309,7 +309,10 @@ class MainWindow(QMainWindow):
         QApplication.instance().aboutToQuit.connect(self.auto.shutdown)
         self.queue_panel=QueuePanel(self.bridge,self); self.tabs.addTab(self.queue_panel,"Queue")
         self.library_store = library if library is not None else LibraryStore()
-        self.library_panel = LibraryPanel(self.library_store, self, protected=self._protected_roots,auto=self.auto); self.tabs.addTab(self.library_panel, "Library")
+        self.library_panel = LibraryPanel(self.library_store, self, protected=self._protected_roots,auto=self.auto,
+            launcher=launcher,archive_root=lambda:self.root.text(),health_settings=lambda:self.settings,
+            bridge=self.bridge); self.tabs.addTab(self.library_panel, "Library")
+        QApplication.instance().aboutToQuit.connect(self.library_panel.health.shutdown)
         self.library_panel.changed.connect(self.auto.sync)
         self.library_panel.open_requested.connect(self._open_in_browse)
         self.discover_panel = DiscoverPanel(self.discover_controller, self)
@@ -759,6 +762,7 @@ class MainWindow(QMainWindow):
         if not self.discover_controller.shutdown(timeout_ms=0):
             self._discover_closing=True; event.ignore(); return
         if self.bridge.closed:
+            if not self.library_panel.health.shutdown(): event.ignore(); return
             if not self.auto.shutdown(): event.ignore(); return
             if not self._window_closed:
                 for timer in self.findChildren(QTimer): timer.stop()
@@ -775,6 +779,7 @@ class MainWindow(QMainWindow):
                 self.discover_controller.terminal.disconnect(self._discover_terminal)
                 QApplication.instance().aboutToQuit.disconnect(self.controller.shutdown); self.clock.stop()
                 QApplication.instance().aboutToQuit.disconnect(self.auto.shutdown)
+                QApplication.instance().aboutToQuit.disconnect(self.library_panel.health.shutdown)
                 QApplication.instance().aboutToQuit.disconnect(self.discover_controller.shutdown)
                 self._theme.disconnect()
                 self._window_closed=True
@@ -786,6 +791,7 @@ class MainWindow(QMainWindow):
         active=self.bridge.run_active or (self.last_view and any(j.owned and j.state.value=="RUNNING" for j in self.last_view.jobs))
         if active and self._confirm_close()!="Pause and Close":
             self._history_closing=False; self._history_enabled(); return
+        if not self.library_panel.health.shutdown(): return
         if not self.auto.shutdown(): return
         self.archive_selected.setEnabled(False); self.queue_panel.start.setEnabled(False); self.bridge.begin_shutdown(True)
 
