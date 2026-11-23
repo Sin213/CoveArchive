@@ -2,11 +2,11 @@
 import os
 from pathlib import Path
 import sys
-from PySide6.QtCore import QIODevice, QSaveFile
 from covearchive.library import model as m
 from covearchive.ui.preferences import PreferenceStore
 
 _READ_ONLY = "Library is read-only until the file is fixed or moved, then restart CoveArchive."
+QSaveFile = None  # Loading a Library must not initialize Qt.
 
 
 class LibraryStore:
@@ -62,6 +62,8 @@ class LibraryStore:
 
 def atomic_write(path, payload):
     """Write bytes atomically without falling back to a destructive direct write."""
+    from PySide6.QtCore import QIODevice, QSaveFile as SaveFile
+    factory = QSaveFile or SaveFile
     output, path = None, Path(path)
     try:
         if sys.platform == "win32":
@@ -71,7 +73,7 @@ def atomic_write(path, payload):
             while not directory.exists():
                 missing.append(directory); directory = directory.parent
             for directory in reversed(missing): directory.mkdir(mode=0o700, exist_ok=True)
-        output = QSaveFile(str(path))
+        output = factory(str(path))
         output.setDirectWriteFallback(False)
         if not output.open(QIODevice.WriteOnly):
             problem = "Could not open library for atomic saving."

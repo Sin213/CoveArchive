@@ -5,12 +5,12 @@ from pathlib import Path
 import re
 import sys
 
-from PySide6.QtCore import QIODevice, QSaveFile
 from covearchive.archive.naming import validate_root
 from covearchive.build_filters import BuildRules
 from covearchive.formats import SUPPORTED_EXTENSIONS
 
 MAX_BYTES = 256 * 1024
+QSaveFile = None  # Resolve Qt only for GUI writes; reads also serve the headless runner.
 _READ_ONLY = "Preferences are read-only until the file is fixed or moved."
 
 
@@ -116,6 +116,8 @@ class PreferenceStore:
         return json.loads(json.dumps(self._preferences)), self.problem, self.writable
 
     def save(self, preferences):
+        from PySide6.QtCore import QIODevice, QSaveFile as SaveFile
+        factory = QSaveFile or SaveFile
         self.load()
         if not self.writable: return self.problem or _READ_ONLY
         try:
@@ -142,7 +144,7 @@ class PreferenceStore:
                 while not directory.exists():
                     missing.append(directory); directory = directory.parent
                 for directory in reversed(missing): directory.mkdir(mode=0o700, exist_ok=True)
-            output = QSaveFile(str(self.path))
+            output = factory(str(self.path))
             output.setDirectWriteFallback(False)
             if not output.open(QIODevice.WriteOnly): return "Could not open preferences for atomic saving."
             if output.write(payload) != len(payload):

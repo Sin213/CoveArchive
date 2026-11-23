@@ -18,8 +18,8 @@
 | --- | --- | --- | --- |
 | CA-N1a | Read-only archive health audit (foundation) | — | COMPLETE |
 | CA-N1b | Repository health/availability checks and latest-vs-archived comparison | N1a | COMPLETE |
-| CA-N1c | Health Dashboard + Check All/Update All | N1a, N1b | IN PROGRESS |
-| CA-N2a | Scheduled preservation runner | N1a | PLANNED |
+| CA-N1c | Health Dashboard + Check All/Update All | N1a, N1b | COMPLETE |
+| CA-N2a | Scheduled preservation runner | N1a | IN PROGRESS |
 | CA-N3a | Incremental Git mirrors | — | PLANNED |
 | CA-N3b | Repository relocation history | N3a | PLANNED |
 | CA-N4a | Pinned versions + remembered asset selections | — | PLANNED |
@@ -80,7 +80,7 @@ ambiguous listings, reused tags, transient errors, and unavailable archives have
 explicit states. Prereleases never drive the headline. No downloads, archive
 mutation, credentials, queue, Library, scheduling, or dashboard are introduced.
 
-## N1c dashboard contract (in progress)
+## N1c dashboard contract
 
 Library's Health view runs only on explicit Check Selected / Check All. Each
 repository uses one anonymous, supervised `--health-worker` process for the N1b
@@ -106,8 +106,23 @@ Identities, Library membership, current health evidence, rules and metadata are
 revalidated; stale or expired preparations are skipped. Process deadlines and a
 five-minute preparation budget bound work. Cancellation before confirmation
 queues nothing; stopping submissions retains jobs already explicitly submitted.
-Checks never enable Auto-Archive or repair/replace preserved data. N1c remains
-IN PROGRESS pending final review and validation; no later slice is started.
+Checks never enable Auto-Archive or repair/replace preserved data. N1c is COMPLETE.
+
+## N2a scheduled preservation (in progress)
+
+An explicit Settings control registers one per-user systemd timer or Windows
+Task Scheduler task. The Qt-free `--scheduled-run` invocation reads saved Library
+Auto-Archive intervals and Browse rules, discovers due GitHub releases, and uses
+the existing durable archive queue with completed-job requeue disabled. Durable
+state records attempts, successful preservation, deadlines and backoff separately.
+Supervised scan/queue children bound runtime; scheduled and GUI queue ownership
+remain exclusive. Paused/cancelled jobs stay stopped. No archive or Git history
+is deleted. Windows Portable onefile refuses task registration because Task
+Scheduler End can orphan its Python child; onedir registration remains available,
+and onefile End behaviour is UNVERIFIED/unsupported.
+See [Scheduled preservation](SCHEDULED_PRESERVATION.md), including
+limitations and the native Windows/frozen verification handoff. N2a remains
+IN PROGRESS pending lead review and platform verification.
 
 ## Feature references
 

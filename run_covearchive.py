@@ -10,7 +10,16 @@ if SOURCE.is_dir():
     sys.path.insert(0, str(SOURCE))
 
 if __name__ == "__main__":
-    if "--scan-worker" in sys.argv:
+    if "--scheduled-run" in sys.argv:
+        from covearchive.scheduled import main
+        raise SystemExit(main(LAUNCHER))
+    elif "--scheduled-queue-worker" in sys.argv:
+        from covearchive.scheduled import queue_worker
+        os._exit(queue_worker())
+    elif "--scheduled-scan-worker" in sys.argv:
+        from covearchive.scheduled import scan_worker
+        os._exit(scan_worker())
+    elif "--scan-worker" in sys.argv:
         from covearchive.scan_worker import main
         os._exit(main())
     elif "--health-worker" in sys.argv:

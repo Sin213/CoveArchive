@@ -1,18 +1,23 @@
 """Modal settings with explicit saves and non-destructive path edits."""
 import os
 import time
+import threading
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer, QEvent
+from PySide6.QtCore import Qt, QTimer, QEvent, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QHBoxLayout,
-    QComboBox, QLineEdit, QPushButton, QLabel, QFileDialog, QDialogButtonBox)
+    QComboBox, QLineEdit, QPushButton, QLabel, QFileDialog, QDialogButtonBox, QGroupBox)
 from covearchive.archive.naming import validate_root
 from covearchive.queue.store import default_queue_path, QueueError
 from covearchive.ui.queue_panel import display, _safe
 from covearchive.ui.theme import set_tone, current_tokens
+from covearchive import scheduler
+from covearchive.scheduled_state import State, default_state_path
+from covearchive.auto_archive import failure_text
 
 
 class SettingsDialog(QDialog):
+    _scheduled_done=Signal(object,object)
     def __init__(self, window):
         super().__init__(window); self.window=window
         self.setWindowTitle('Settings'); self.setModal(True); self.setMinimumWidth(520)
@@ -48,6 +53,19 @@ class SettingsDialog(QDialog):
         self.github_token.returnPressed.connect(self._save_token)
         self.access_timer=QTimer(self); self.access_timer.setInterval(2000)
         self.access_timer.timeout.connect(self._refresh_access)
+        group=QGroupBox('Scheduled preservation'); schedule=QFormLayout(group); form.addRow(group)
+        self.schedule_status=QLabel('Not checked'); self.schedule_status.setAccessibleName('Scheduler status')
+        row=QHBoxLayout(); row.addWidget(self.schedule_status,1)
+        self.schedule_toggle=QPushButton('Enable'); self.schedule_check=QPushButton('Check status')
+        for button in (self.schedule_toggle,self.schedule_check): row.addWidget(button)
+        schedule.addRow(row)
+        self.schedule_last=QLabel(); self.schedule_next=QLabel(); self.schedule_error=QLabel()
+        for name,label in (('Last completed run',self.schedule_last),('Next check',self.schedule_next),('Last scheduling error',self.schedule_error)):
+            label.setTextFormat(Qt.PlainText); label.setWordWrap(True); label.setAccessibleName(name); schedule.addRow(label)
+        self._schedule_enabled=False; self._scheduled_done.connect(self._schedule_result,Qt.QueuedConnection)
+        self.schedule_check.clicked.connect(lambda:self._schedule_action('status'))
+        self.schedule_toggle.clicked.connect(lambda:self._schedule_action('disable' if self._schedule_enabled else 'enable'))
+        self._schedule_state()
         section('DATA LOCATIONS','Read-only; shown for support.')
         self.preferences_path=QLineEdit(display(window.preferences.path or 'Unavailable'))
         try: queue_path=default_queue_path()
@@ -85,6 +103,48 @@ class SettingsDialog(QDialog):
 
     def hideEvent(self,event):
         self.access_timer.stop(); self.github_token.clear(); super().hideEvent(event)
+
+    def _schedule_state(self,data=None):
+        if data is None:
+            try:
+                saved=State.load(default_state_path()); data=saved.data
+                if saved.error: data['last_error']=saved.error
+            except (QueueError,OSError): data={}
+        def stamp(value):
+            if value is None: return 'Unknown'
+            try: return time.strftime('%Y-%m-%d %H:%M',time.localtime(value))
+            except (ValueError,OverflowError,OSError): return 'Unknown'
+        self.schedule_last.setText('Last completed run: '+stamp(data.get('last_finish')))
+        due=[r['next_due'] for r in data.get('repositories',{}).values() if r['next_due'] is not None]
+        self.schedule_next.setText('Next check: '+stamp(max(min(due),data.get('blocked_until') or 0) if due else None))
+        code=data.get('last_error')
+        message={'state_invalid':'Schedule state was unreadable; safe defaults were used.',
+            'invalid_library':'The saved Library could not be read.',
+            'invalid_preferences':'Saved preferences could not be read.',
+            'interrupted':'The last run was interrupted.', 'download_failed':'A queued download did not complete.',
+            'needs_attention':'Archive Health needs review; scheduled work remains queued for the GUI.',
+            'disk_full':'The archive disk is full.', 'user_stopped':'A matching job is paused or cancelled.'}.get(code)
+        self.schedule_error.setText('Last error: '+(message or failure_text(code) if code else 'None'))
+
+    def _schedule_action(self,action):
+        self.schedule_toggle.setEnabled(False); self.schedule_check.setEnabled(False)
+        def work():
+            try:
+                backend=scheduler.backend(getattr(self.window.controller,'launcher',None))
+                result=getattr(backend,action)() if backend is not None else scheduler.Status(None,'unavailable','unsupported_platform')
+                saved=State.load(default_state_path()); data=saved.data
+                if saved.error: data['last_error']=saved.error
+            except Exception: result=scheduler.Status(None,'unavailable','scheduler_unavailable'); data={}
+            try: self._scheduled_done.emit(result,data)
+            except RuntimeError: pass  # The parent window was closed while the command completed.
+        threading.Thread(target=work,daemon=True,name='covearchive-scheduler').start()
+
+    def _schedule_result(self,result,data):
+        self._schedule_enabled=result.enabled is True
+        self.schedule_status.setText({'on':'On','off':'Off','inactive':'On (timer inactive)'}.get(result.state,'Unavailable'))
+        self.schedule_toggle.setText('Disable' if self._schedule_enabled else 'Enable')
+        self.schedule_toggle.setEnabled(True); self.schedule_check.setEnabled(True); self._schedule_state(data)
+        if result.error: self.schedule_error.setText('Last error: '+result.error.replace('_',' '))
 
     def _refresh_access(self):
         status=self.window.auth.status()
