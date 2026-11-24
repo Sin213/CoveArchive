@@ -286,8 +286,8 @@ def install(window):
     w.destination.setFont(fixed_font(w)); set_tone(w.destination,'muted'); inspector.addWidget(w.destination)
     w.archive_selected.setToolTip('Archive Selected (Ctrl+Enter)'); inspector.addWidget(w.archive_selected)
     separator=QFrame(); separator.setFrameShape(QFrame.HLine); inspector.addWidget(separator)
-    inspector.addWidget(heading('Git history')); inspector.addWidget(label(w.history_button.toolTip()))
-    inspector.addWidget(w.history_button); inspector.addWidget(w.history_cancel)
+    inspector.addWidget(heading('Git history')); inspector.addWidget(label('Bundle snapshots and incremental mirrors'))
+    inspector.addWidget(w.history_button); inspector.addWidget(w.mirror_update); inspector.addWidget(w.mirror_verify); inspector.addWidget(w.history_cancel)
     inspector.addWidget(w.history_status); inspector.addStretch()
     def reveal_history():
         if not w._window_closed:

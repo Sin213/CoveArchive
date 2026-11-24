@@ -23,17 +23,26 @@ ERRORS = {
     "empty_repository": "Repository has no branches or tags to archive.",
     "busy": "Another Git history operation is running; retry later.",
     "conflict": "Git history destination conflicts with an existing file.",
-    "corrupt": "Git history snapshot is damaged; existing files were retained.",
+    "corrupt": "Git history data is damaged or unsafe; existing files were retained.",
+    "missing_mirror": "No Git mirror exists yet; use Update Git Mirror first.",
+    "missing_capture": "The requested Git mirror capture is unavailable.",
     "unsafe_path": "Choose a valid, existing archive root directory.",
+    "unsafe_destination": "Export destination overlaps the preserved Git mirror or cannot be safely resolved.",
+    "unsafe_permissions": "Git mirror permissions allow another user to modify preserved data; choose a private archive directory.",
+    "permissions_unavailable": "Windows archive permissions could not be checked; the Git mirror was not opened.",
     "internal_error": "Git history could not be archived; retry later."}
 STAGES = {"checking": "Checking Git history...", "downloading": "Downloading Git history...",
     "verifying": "Verifying Git history...", "publishing": "Publishing Git history (cannot be cancelled now)..."}
 
 
 def result_text(result):
-    path = str(result.snapshot)
+    mirror = isinstance(result, githistory.MirrorResult)
+    path = str(result.path if mirror else result.snapshot)
     if re.search(r"://|[?&](?:token|sig|secret)=", path, re.I): path = "[redacted destination]"
     path = "".join(c for c in path if c.isprintable())
+    if mirror:
+        action = {"UPDATED": "updated", "VERIFIED": "verified", "UNCHANGED": "unchanged; nothing downloaded"}[result.status]
+        return f"Git mirror {action}: {result.ref_count} refs; last capture {result.created_utc or 'none'}; {path}"
     if result.status == "UNCHANGED":
         text = f"Git history already up to date (snapshot {Path(path).name}) at {Path(path).parent}; nothing downloaded"
     else: text = f"Archived Git history: {result.ref_count} refs, {size_text(result.size)}; {path}"
@@ -57,13 +66,16 @@ class HistoryController(QObject):
     @property
     def is_active(self): return self.running
 
-    def start(self, repository, archive_root):
+    def start(self, repository, archive_root, operation="snapshot"):
         if self.running: return False
+        worker = {"snapshot": githistory.archive_history, "update": githistory.update_mirror,
+            "verify": githistory.verify_mirror}.get(operation)
+        if worker is None: return False
         if self._thread is not None: self._thread.join(0)
         self._cancel = threading.Event(); cancel = self._cancel
         def work():
             try:
-                result = githistory.archive_history(repository, archive_root,
+                result = worker(repository, archive_root,
                     cancel=cancel.is_set, progress=self.progress.emit)
             except Exception as error:
                 code = error.code if isinstance(error, githistory.HistoryError) and error.code in ERRORS else "internal_error"

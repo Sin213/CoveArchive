@@ -19,8 +19,8 @@
 | CA-N1a | Read-only archive health audit (foundation) | — | COMPLETE |
 | CA-N1b | Repository health/availability checks and latest-vs-archived comparison | N1a | COMPLETE |
 | CA-N1c | Health Dashboard + Check All/Update All | N1a, N1b | COMPLETE |
-| CA-N2a | Scheduled preservation runner | N1a | IN PROGRESS |
-| CA-N3a | Incremental Git mirrors | — | PLANNED |
+| CA-N2a | Scheduled preservation runner | N1a | COMPLETE |
+| CA-N3a | Incremental Git mirrors | — | IN PROGRESS |
 | CA-N3b | Repository relocation history | N3a | PLANNED |
 | CA-N4a | Pinned versions + remembered asset selections | — | PLANNED |
 | CA-N4b | Source-only fallback | — | PLANNED |
@@ -108,7 +108,7 @@ five-minute preparation budget bound work. Cancellation before confirmation
 queues nothing; stopping submissions retains jobs already explicitly submitted.
 Checks never enable Auto-Archive or repair/replace preserved data. N1c is COMPLETE.
 
-## N2a scheduled preservation (in progress)
+## N2a scheduled preservation
 
 An explicit Settings control registers one per-user systemd timer or Windows
 Task Scheduler task. The Qt-free `--scheduled-run` invocation reads saved Library
@@ -121,8 +121,26 @@ is deleted. Windows Portable onefile refuses task registration because Task
 Scheduler End can orphan its Python child; onedir registration remains available,
 and onefile End behaviour is UNVERIFIED/unsupported.
 See [Scheduled preservation](SCHEDULED_PRESERVATION.md), including
-limitations and the native Windows/frozen verification handoff. N2a remains
-IN PROGRESS pending lead review and platform verification.
+limitations and the native Windows/frozen verification handoff. N2a is COMPLETE.
+
+## N3a incremental Git mirrors (in progress)
+
+Browse offers explicit **Update Git Mirror** and **Verify Mirror** actions beside
+the existing immutable bundle snapshot action. One persistent reftable bare Git
+repository per canonical provider/host/project identity negotiates incremental
+fetches. Every capture has immutable retention refs and a verified JSON commit
+marker. Deleted branches, force-pushed tips and rewritten tags remain available;
+no update prunes refs or objects, runs garbage collection, or replaces bundles.
+See [Git mirror storage and restoration](GIT_MIRRORS.md).
+
+Scheduled mirror opt-in is blocked and remains OFF: N2a supervises release-scan
+and release-queue worker protocols, with release-specific durable state and
+Library intervals. It has no supervised Git operation protocol or independent
+mirror opt-in/state. Reusing Auto-Archive would authorize extra downloads and
+share success/backoff incorrectly. A separate bounded Git worker and explicit
+mirror preference/state are prerequisites; no scheduling capability is claimed.
+N3a remains IN PROGRESS pending independent HARDENED review and native Windows
+Git-for-Windows, NTFS, GUI and frozen onedir/onefile verification.
 
 ## Feature references
 

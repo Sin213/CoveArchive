@@ -265,14 +265,20 @@ class MainWindow(QMainWindow):
         self.root.textChanged.connect(self._destination); self.root.returnPressed.connect(self._destination); self.browse.clicked.connect(self._browse)
         self.select_matching=QPushButton("Select Matching"); self.clear_selection=QPushButton("Clear Selection"); self.archive_selected=QPushButton("Archive Selected (0)"); self.archive_selected.setEnabled(False)
         self.history_button=QPushButton("Archive Git History"); self.history_cancel=QPushButton("Cancel Git History")
+        self.mirror_update=QPushButton("Update Git Mirror"); self.mirror_verify=QPushButton("Verify Mirror")
         self.history_button.setEnabled(False); self.history_cancel.setEnabled(False)
-        for button in (self.history_button,self.history_cancel):
+        for button in (self.history_button,self.history_cancel,self.mirror_update,self.mirror_verify):
             button.setAccessibleName(button.text())
-        description="Archive public commits, branches and tags only; NOT Git LFS file contents or submodule repository contents."
+        description="Create an immutable history.bundle snapshot of public commits, branches and tags only; NOT Git LFS file contents or submodule repository contents."
         self.history_button.setToolTip(description); self.history_button.setAccessibleDescription(description)
+        for button, text in ((self.mirror_update,"Incrementally preserve public branches and tags, including earlier tips; excludes Git LFS and submodule contents. Scheduled mirror updates are unavailable; manual only."),
+                (self.mirror_verify,"Check the persistent mirror and every captured ref without contacting upstream.")):
+            button.setToolTip(text); button.setAccessibleDescription(text)
         self.history_cancel.setToolTip("Stop the running Git history archive"); self.history_cancel.setAccessibleDescription(self.history_cancel.toolTip())
         self.history_status=browse_panes.WrappedPath(); self.history_status.setTextFormat(Qt.PlainText); self.history_status.setWordWrap(True)
         self.history_button.clicked.connect(self._archive_history); self.history_cancel.clicked.connect(self._cancel_history)
+        self.mirror_update.clicked.connect(lambda: self._archive_history(operation="update"))
+        self.mirror_verify.clicked.connect(lambda: self._archive_history(operation="verify"))
         self.history_controller.progress.connect(self._history_progress,Qt.QueuedConnection)
         self.history_controller.finished.connect(self._history_finished,Qt.QueuedConnection)
         self.history_controller.failed.connect(self._history_failed,Qt.QueuedConnection)
@@ -298,7 +304,7 @@ class MainWindow(QMainWindow):
                 (self.history_status,"normal"),(self.summary,"muted"),(self.detail,"muted"),(self.destination,"muted")):
             set_tone(label,tone)
         self.clock = QTimer(self); self.clock.setInterval(250); self.clock.timeout.connect(self._tick)
-        controls = [self.url,self.scan,self.cancel,self.prereleases,*self.formats.values(),self.include,self.exclude,self.save_rules,self.root,self.browse,self.select_matching,self.clear_selection,self.archive_selected,self.history_button,self.history_cancel,self.tree]
+        controls = [self.url,self.scan,self.cancel,self.prereleases,*self.formats.values(),self.include,self.exclude,self.save_rules,self.root,self.browse,self.select_matching,self.clear_selection,self.archive_selected,self.history_button,self.mirror_update,self.mirror_verify,self.history_cancel,self.tree]
         for widget,name in zip(controls[:4],("GitHub URL","Scan","Cancel Scan","Include prereleases")):
             widget.setAccessibleName(name)
         self.tree.setAccessibleName("Releases and assets")
@@ -354,7 +360,7 @@ class MainWindow(QMainWindow):
 
         browse_panes.install(self)
         self.tabs.setFocusPolicy(Qt.NoFocus); self.tabs.tabBar().setFocusPolicy(Qt.NoFocus)
-        order=[self.nav,self.url,self.scan,self.cancel,self.queue_chip,self.theme_toggle,self.settings_button,self.filter_toggle,*self.formats.values(),self.prereleases,self.include,self.exclude,self.save_rules,self.releases_toggle,self.release_list,self.show_prereleases,self.select_matching,self.clear_selection,self.tree,self.root,self.browse,self.archive_selected,self.history_button,self.history_cancel,self.queue_panel.start,*self.queue_panel.buttons.values(),self.queue_panel.table]
+        order=[self.nav,self.url,self.scan,self.cancel,self.queue_chip,self.theme_toggle,self.settings_button,self.filter_toggle,*self.formats.values(),self.prereleases,self.include,self.exclude,self.save_rules,self.releases_toggle,self.release_list,self.show_prereleases,self.select_matching,self.clear_selection,self.tree,self.root,self.browse,self.archive_selected,self.history_button,self.mirror_update,self.mirror_verify,self.history_cancel,self.queue_panel.start,*self.queue_panel.buttons.values(),self.queue_panel.table]
         order += [getattr(self.library_panel,name) for name in ('url','add','bulk','import_button','export_button','search','tree','new','rename_collection','delete','table','move','rename','remove','auto_button','open_button')]
         order += self.discover_panel.focus_controls
         for view in (self.tree,self.release_list,self.queue_panel.table,self.library_panel.tree,self.library_panel.table): view.setTabKeyNavigation(False)
@@ -443,6 +449,7 @@ class MainWindow(QMainWindow):
         except (GitHubUrlError, TypeError, ProtocolError): provider="Unsupported"
         self.provider.setText(provider); self.provider.setVisible(bool(self.url.text().strip()))
         set_tone(self.provider,"muted" if provider=="Unsupported" else "normal")
+        if hasattr(self,"mirror_verify"): self._history_enabled()
 
     def _focus_source(self):
         self.tabs.setCurrentIndex(0)
@@ -452,17 +459,30 @@ class MainWindow(QMainWindow):
         try: validate_root(self.root.text()); valid=True
         except ValueError: valid=False
         active=self._history_pending or self.history_controller.running
-        self.history_button.setEnabled(bool(self.catalog) and valid and not active and not self.bridge.shutting_down and not self.bridge.closed and not self._history_closing)
+        ready=valid and not active and not self.bridge.shutting_down and not self.bridge.closed and not self._history_closing
+        self.history_button.setEnabled(bool(self.catalog) and ready)
+        self.mirror_update.setEnabled(self.history_button.isEnabled())
+        self.mirror_verify.setEnabled(ready and self._verify_repository() is not None)
         self.history_cancel.setEnabled(active and not self._history_closing and not self._history_cancelling and getattr(self,'_history_stage',None)!='publishing')
         self.history_cancel.setVisible(active)
 
-    def _archive_history(self):
+    def _verify_repository(self):
+        try: target=parse_repository_url(self.url.text())
+        except (GitHubUrlError,TypeError,ProtocolError): return None
+        if isinstance(target,(RepositoryTarget,ReleaseListTarget)):
+            return RepositoryTarget(target.owner,target.repo,target.provider,target.host)
+        return None
+
+    def _archive_history(self, checked=False, *, operation="snapshot"):
         self._history_enabled()
-        if not self.history_button.isEnabled(): return
+        button={"snapshot":self.history_button,"update":self.mirror_update,"verify":self.mirror_verify}.get(operation)
+        if button is None or not button.isEnabled(): return
+        repository=self._verify_repository() if operation=="verify" else self.catalog.repository
+        if repository is None: return
         self._history_cancelling=False
         self._history_stage=None
-        if self.history_controller.start(self.catalog.repository,str(Path(self.root.text()))):
-            self._history_pending=True; set_tone(self.history_status,"normal"); self.history_status.setText("Archiving Git history..."); self._history_enabled()
+        if self.history_controller.start(repository,str(Path(self.root.text())),operation=operation):
+            self._history_pending=True; set_tone(self.history_status,"normal"); self.history_status.setText("Archiving Git history..." if operation=="snapshot" else "Checking Git mirror..."); self._history_enabled()
 
     def _cancel_history(self):
         self._history_cancelling=True; self.history_controller.cancel()
