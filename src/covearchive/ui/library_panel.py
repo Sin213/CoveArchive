@@ -12,6 +12,7 @@ from covearchive.ui.theme import set_role, set_tone, current_tokens
 from covearchive.ui.queue_panel import _safe, _safe_lines
 from covearchive.ui.health_panel import HealthPanel
 from covearchive.ui.health_process import HealthController
+from covearchive.ui.relocation_panel import RelocationPanel
 
 
 def reason(code):
@@ -72,7 +73,7 @@ class LibraryPanel(W.QWidget):
     open_requested=Signal(str)
     def __init__(self, store, parent=None, protected=lambda: (), auto=None, *, health_controller=None,
                  archive_root=lambda: '', health_settings=lambda: {}, launcher=None, bridge=None,
-                 health_update_check=None, health_update_scan=None):
+                 health_update_check=None, health_update_scan=None, relocation_controller=None):
         super().__init__(parent)
         self.protected = protected; self.auto=auto
         self.store = store; self.library, _, _ = store.load(); self.scope = None
@@ -112,12 +113,12 @@ class LibraryPanel(W.QWidget):
         for pane,heading in ((left,"Collections"),(right,"Repositories")):
             pane.setContentsMargins(2,4,2,4); pane.setSpacing(4)
             label=W.QLabel(heading.upper()); label.setTextFormat(Qt.PlainText); label.setProperty("heading",True); label.setProperty('inspectorHeading',True); pane.addWidget(label)
-        self.tree = W.QTreeWidget(); self.tree.setHeaderHidden(True); self.tree.setMinimumHeight(140); left.addWidget(self.tree)
+        self.tree = W.QTreeWidget(); self.tree.setHeaderHidden(True); self.tree.setMinimumHeight(90); left.addWidget(self.tree)
         folders = W.QHBoxLayout(); left.addLayout(folders)
         self.new = button("New", self._new, folders); self.rename_collection = button("Rename", self._rename_collection, folders)
         self.delete = button("Delete", self._delete, folders)
         folders.addStretch()
-        self.table = W.QTableView(); self.table.setObjectName("repositoryTable"); self.table.setMinimumHeight(140); self.table.setTextElideMode(Qt.ElideRight); self.model = RepositoryModel(self); self.model.rows = (); self.model.labels = []
+        self.table = W.QTableView(); self.table.setObjectName("repositoryTable"); self.table.setMinimumHeight(100); self.table.setTextElideMode(Qt.ElideRight); self.model = RepositoryModel(self); self.model.rows = (); self.model.labels = []
         self.table.setModel(self.model); self.table.setSelectionBehavior(W.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(W.QAbstractItemView.ExtendedSelection); self.table.verticalHeader().hide()
         self.table.verticalHeader().setSectionResizeMode(W.QHeaderView.Fixed); self.table.verticalHeader().setDefaultSectionSize(self.table.fontMetrics().height()+12)
@@ -147,6 +148,10 @@ class LibraryPanel(W.QWidget):
         self.auto_detail=W.QLabel(); self.auto_detail.setTextFormat(Qt.PlainText); self.auto_detail.setWordWrap(True); auto_layout.addWidget(self.auto_detail)
         self.auto_placeholder=W.QLabel("Select a repository to see Auto-Archive details.")
         self.auto_placeholder.setTextFormat(Qt.PlainText); set_tone(self.auto_placeholder,"muted"); auto_layout.addWidget(self.auto_placeholder)
+        self.relocation = RelocationPanel(store.path.with_name('relocation.json') if store.path else None,
+            self.save_discovered, self, controller=relocation_controller, launcher=launcher)
+        collections_layout.addWidget(self.relocation)
+        self.relocation.open_requested.connect(self.open_requested)
         self.health=HealthPanel(lambda:self.library,
             health_controller if health_controller is not None else HealthController(launcher,parent=self),
             archive_root,health_settings,self,update_check=health_update_check,update_scan=health_update_scan,
@@ -222,6 +227,8 @@ class LibraryPanel(W.QWidget):
         for widget in (self.move, self.remove, self.rename): widget.setEnabled(self.store.writable and (count == 1 if widget is self.rename else count > 0))
         self.auto_button.setEnabled(self.store.writable and count>0 and self.auto is not None)
         self.open_button.setEnabled(count == 1)
+        rows = self.table.selectionModel().selectedRows()
+        self.relocation.select(self.model.rows[rows[0].row()] if count == 1 else None)
         self._empty_state()
 
     def _open_in_browse(self):
@@ -406,6 +413,7 @@ class LibraryPanel(W.QWidget):
         self._future = self._worker.submit(_prepare_import, path, self._snapshot); self._poll.start()
         self.changed.emit()
     def closeEvent(self, event):
+        if not self.relocation.shutdown(): event.ignore(); return
         if not self.health.shutdown(): event.ignore(); return
         self._closed = True; self._poll.stop(); self._worker.shutdown(wait=False, cancel_futures=True); super().closeEvent(event)
     def hideEvent(self, event):

@@ -20,8 +20,8 @@
 | CA-N1b | Repository health/availability checks and latest-vs-archived comparison | N1a | COMPLETE |
 | CA-N1c | Health Dashboard + Check All/Update All | N1a, N1b | COMPLETE |
 | CA-N2a | Scheduled preservation runner | N1a | COMPLETE |
-| CA-N3a | Incremental Git mirrors | — | IN PROGRESS |
-| CA-N3b | Repository relocation history | N3a | PLANNED |
+| CA-N3a | Incremental Git mirrors | — | COMPLETE |
+| CA-N3b | Anonymous GitHub relocation checks and append-only location history | N3a | IN PROGRESS |
 | CA-N4a | Pinned versions + remembered asset selections | — | PLANNED |
 | CA-N4b | Source-only fallback | — | PLANNED |
 | CA-N4c | Interrupted-download resume | — | PLANNED |
@@ -123,7 +123,7 @@ and onefile End behaviour is UNVERIFIED/unsupported.
 See [Scheduled preservation](SCHEDULED_PRESERVATION.md), including
 limitations and the native Windows/frozen verification handoff. N2a is COMPLETE.
 
-## N3a incremental Git mirrors (in progress)
+## N3a incremental Git mirrors (complete)
 
 Browse offers explicit **Update Git Mirror** and **Verify Mirror** actions beside
 the existing immutable bundle snapshot action. One persistent reftable bare Git
@@ -139,8 +139,52 @@ Library intervals. It has no supervised Git operation protocol or independent
 mirror opt-in/state. Reusing Auto-Archive would authorize extra downloads and
 share success/backoff incorrectly. A separate bounded Git worker and explicit
 mirror preference/state are prerequisites; no scheduling capability is claimed.
-N3a remains IN PROGRESS pending independent HARDENED review and native Windows
-Git-for-Windows, NTFS, GUI and frozen onedir/onefile verification.
+N3a is COMPLETE. Native Windows Git-for-Windows, NTFS, GUI and frozen
+onedir/onefile verification remain platform handoff requirements.
+
+## N3b repository relocation history (in progress)
+
+Library offers an explicit anonymous **Check repository location** action for
+public GitHub repositories. Numeric repository ids anchor durable observations.
+Saved URLs are checked separately for reuse. Reuse is report-only, and a new
+alias of a tracked id yields an inconclusive result. Only 404 and 410 confirm
+absence for a lookup. A whole-file snapshot comparison protects append-only
+history from concurrent writes. New locations can be opened in Browse or explicitly
+saved as separate Library entries with Auto-Archive off. Existing archives, Git
+storage and path-based preservation settings stay put.
+See [Repository relocation history](RELOCATION.md). N3b is IN PROGRESS.
+
+### Deferred enhancements (CA-N3c candidates, not prerequisites for CA-N4a)
+
+- Replacement-occupant recording for reused URLs.
+- Adoption of tracked aliases with stable-id corroboration.
+- Per-record concurrent merging.
+
+### N3b review status and accepted follow-ups
+
+**Astra's sixth HARDENED review (staged tree 8afdf23e) did NOT approve this
+candidate.** It returned "patch is incorrect" with 7 findings (none High). Sin
+conditionally accepted N3b with these as documented follow-ups, pending native
+Windows verification. No Astra approval receipt exists for N3b. Earlier High
+findings (frozen windowed worker streams, contradictory current-URL evidence,
+write after unconfirmed absence) were repaired and not raised again. Impact
+below was assessed by code reading and reachability search, not reproduced.
+
+| # | Sev | Finding | Reachable in shipped app | Limitation / impact |
+|---|---|---|---|---|
+| 1 | Medium | Byte-valued credential header names on an injected session are not rejected (`github/client.py`). | No: `check_location` builds its own client; nothing in `src` injects a session. | Defense in depth only. |
+| 2 | Medium | A queue run that ends and another that starts during the relocation-worker wait can inherit the earlier pause approval (`ui/window.py`). | Narrowly: needs a run transition during a close. | A run pauses without a prompt. No data loss shown. |
+| 3 | Medium | On Windows a concurrent history read can fail an update with a sharing violation (`relocation.py` load vs replace). | Windows only; untestable on Arch. | Result is INCONCLUSIVE `state_write`, no data loss, retry works. Verify natively. |
+| 4 | Low | A reuse result withholding the destination because of a historical binding reports reason `not_found`. | Reason is not shown in the UI. | Internal label only. |
+| 5 | Medium | A standalone `LibraryPanel` stays disabled after an ignored close. | No: only constructed inside `MainWindow`. | Test-only path. |
+| 6 | Low | After Keep Open the inspector can still say "Checking..." with no worker. | Yes. | Cosmetic. |
+| 7 | Low | A provider contradiction shows "Another check changed or locked the history". | Yes. | Misleading wording only. |
+
+Other open limits: one full-suite run on an earlier tree reported 1 failure that
+was not captured and never reproduced (later full runs clean, stress runs clean).
+Native Windows NTFS, frozen onedir/onefile worker lifecycle and real windowed
+package pipes were not verified on the final tree. If Windows shows a material
+security, identity-integrity or data-loss defect, defer N3b.
 
 ## Feature references
 

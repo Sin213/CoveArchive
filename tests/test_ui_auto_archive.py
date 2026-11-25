@@ -277,7 +277,7 @@ def test_window_close_stops_both_scans_before_queue(env,rig,tmp_path,monkeypatch
     bridge,sink=rig(); manual=Scan(); window=MainWindow(controller=manual,bridge=bridge,
         library=LibraryStore(tmp_path/'empty.json'),preferences=PreferenceStore(tmp_path/'empty-prefs.json'))
     window.show(); calls=[]; window._confirm_close=lambda:'Pause and Close'
-    if active: window.last_view=NS(seq=10**9,jobs=(NS(owned=True,state=S.RUNNING),))
+    if active: window.last_view=NS(seq=10**9,jobs=(NS(job_id='job-1',owned=True,state=S.RUNNING),))
     try:
         with monkeypatch.context() as patch:
             if not hasattr(window,'auto'): patch.setattr(window,'auto',NS(),raising=False)
@@ -290,7 +290,7 @@ def test_window_close_stops_both_scans_before_queue(env,rig,tmp_path,monkeypatch
 
 def test_keep_open_preserves_auto_and_next_due_check(env,rig,tmp_path):
     e=env; bridge,sink=rig(); automatic=Scan(); window,manual=window_for(e,tmp_path,bridge,automatic)
-    window.last_view=NS(seq=10**9,jobs=(NS(owned=True,state=S.RUNNING),)); window._confirm_close=lambda:'Keep Open'
+    window.last_view=NS(seq=10**9,jobs=(NS(job_id='job-1',owned=True,state=S.RUNNING),)); window._confirm_close=lambda:'Keep Open'
     try:
         window.close()
         assert window.isVisible() and window.auto.timer.isActive() and not automatic.closed

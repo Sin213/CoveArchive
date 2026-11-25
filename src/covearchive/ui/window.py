@@ -203,6 +203,8 @@ class MainWindow(QMainWindow):
         self.discover_controller = discover_controller if discover_controller is not None else DiscoverController(launcher, parent=self)
         self.discover_controller.setParent(self)
         self._discover_closing = False
+        self._relocation_closing = False
+        self._relocation_pause_confirmed = None
         self.catalog = None; self.show_catalog = False; self.active_id = None
         self.started = 0; self.checked=set(); self.eligible={}; self.rules=BuildRules(); self._rules_repo=None; self.enqueue_pending=False; self._scan_provider='github'
         self.bridge=bridge if bridge is not None else ArchiveBridge(parent=self, runner_options={"auth":self.auth})
@@ -319,6 +321,8 @@ class MainWindow(QMainWindow):
             launcher=launcher,archive_root=lambda:self.root.text(),health_settings=lambda:self.settings,
             bridge=self.bridge); self.tabs.addTab(self.library_panel, "Library")
         QApplication.instance().aboutToQuit.connect(self.library_panel.health.shutdown)
+        self.library_panel.relocation.controller.terminal.connect(self._relocation_terminal)
+        QApplication.instance().aboutToQuit.connect(self.library_panel.relocation.shutdown)
         self.library_panel.changed.connect(self.auto.sync)
         self.library_panel.open_requested.connect(self._open_in_browse)
         self.discover_panel = DiscoverPanel(self.discover_controller, self)
@@ -417,6 +421,10 @@ class MainWindow(QMainWindow):
     def _discover_terminal(self, *_):
         if self._discover_closing and not self._window_closed:
             self._discover_closing = False
+            QTimer.singleShot(0, self.close)
+
+    def _relocation_terminal(self, *_):
+        if self._relocation_closing and not self._window_closed:
             QTimer.singleShot(0, self.close)
 
     def set_appearance(self, name, *, persist=True):
@@ -772,18 +780,31 @@ class MainWindow(QMainWindow):
             if self.preferences.writable: self.preferences.save(self.settings)
             self.close()
 
+    def _abandon_relocation_close(self):
+        self._relocation_closing=False
+        self._relocation_pause_confirmed=None
+        self.library_panel.relocation.restore()
+
     def closeEvent(self,event):
         if self._history_pending or self.history_controller.running:
+            if self._relocation_closing: self._abandon_relocation_close()
             self._history_closing=True; self.history_controller.cancel()
             self.history_status.setText("Stopping Git history before closing...")
             self._history_enabled(); event.ignore(); return
         self.history_controller.shutdown()
-        if not self.controller.shutdown(): event.ignore(); return
+        if not self.controller.shutdown():
+            if self._relocation_closing: self._abandon_relocation_close()
+            event.ignore(); return
         if not self.discover_controller.shutdown(timeout_ms=0):
+            if self._relocation_closing: self._abandon_relocation_close()
             self._discover_closing=True; event.ignore(); return
         if self.bridge.closed:
-            if not self.library_panel.health.shutdown(): event.ignore(); return
-            if not self.auto.shutdown(): event.ignore(); return
+            if not self.library_panel.relocation.shutdown():
+                self._relocation_closing=True; event.ignore(); return
+            self._relocation_closing=False
+            self._relocation_pause_confirmed=None
+            if not self.library_panel.health.shutdown() or not self.auto.shutdown():
+                self._abandon_relocation_close(); event.ignore(); return
             if not self._window_closed:
                 for timer in self.findChildren(QTimer): timer.stop()
                 for shortcut in self.findChildren(QShortcut): shortcut.setEnabled(False)
@@ -797,9 +818,11 @@ class MainWindow(QMainWindow):
                 self.discover_panel.library_requested.disconnect(self._discover_library)
                 self.library_panel.changed.disconnect(self.discover_panel.refresh_saved_state)
                 self.discover_controller.terminal.disconnect(self._discover_terminal)
+                self.library_panel.relocation.controller.terminal.disconnect(self._relocation_terminal)
                 QApplication.instance().aboutToQuit.disconnect(self.controller.shutdown); self.clock.stop()
                 QApplication.instance().aboutToQuit.disconnect(self.auto.shutdown)
                 QApplication.instance().aboutToQuit.disconnect(self.library_panel.health.shutdown)
+                QApplication.instance().aboutToQuit.disconnect(self.library_panel.relocation.shutdown)
                 QApplication.instance().aboutToQuit.disconnect(self.discover_controller.shutdown)
                 self._theme.disconnect()
                 self._window_closed=True
@@ -808,11 +831,21 @@ class MainWindow(QMainWindow):
         if self.bridge.shutting_down:
             if self._close_status: self._shutdown_status(self._close_status)
             return
-        active=self.bridge.run_active or (self.last_view and any(j.owned and j.state.value=="RUNNING" for j in self.last_view.jobs))
-        if active and self._confirm_close()!="Pause and Close":
-            self._history_closing=False; self._history_enabled(); return
-        if not self.library_panel.health.shutdown(): return
-        if not self.auto.shutdown(): return
+        run_active=self.bridge.run_active
+        jobs=self.last_view.jobs if self.last_view else ()
+        running=frozenset(j.job_id for j in jobs if j.owned and j.state.value=="RUNNING")
+        confirmed_run,confirmed_jobs=self._relocation_pause_confirmed or (False,frozenset())
+        if (run_active and not confirmed_run) or running - confirmed_jobs:
+            if self._confirm_close()!="Pause and Close":
+                self._abandon_relocation_close()
+                self._history_closing=False; self._history_enabled(); return
+            self._relocation_pause_confirmed=(run_active,running)
+        if not self.library_panel.relocation.shutdown():
+            self._relocation_closing=True; return
+        self._relocation_closing=False
+        self._relocation_pause_confirmed=None
+        if not self.library_panel.health.shutdown() or not self.auto.shutdown():
+            self._abandon_relocation_close(); return
         self.archive_selected.setEnabled(False); self.queue_panel.start.setEnabled(False); self.bridge.begin_shutdown(True)
 
 

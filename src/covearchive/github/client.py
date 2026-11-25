@@ -538,3 +538,97 @@ class GitHubReleaseClient:
             return tuple(parse_release(item) for item in obj)
         except ReleaseSchemaError as exc:
             raise InvalidResponseError("invalid_release") from exc
+
+
+class GitHubRepositoryClient(GitHubReleaseClient):
+    """Anonymous bounded repository metadata, using the hardened release transport.
+
+    Redirects route requests only. The caller must compare numeric identities.
+    A shared budget bounds both lookups (saved URL and stable id).
+    """
+    def __init__(self, session=None):
+        super().__init__(session, timeout=(5.0, 10.0), max_requests=8,
+                         max_retries=0, max_redirects=3, max_response_bytes=256 * 1024)
+        self._state = dict(pages=0, requests=0, redirects=0)
+
+    @staticmethod
+    def _metadata_path(url, error):
+        from covearchive.providers import canonical_url, validate_repository
+        parts = _api_url(url, error)
+        if '?' in url: raise error()
+        match = re.fullmatch(r'/repositories/([1-9][0-9]{0,18})', parts.path)
+        if match:
+            if int(match[1]) > 2**63 - 1: raise error()
+            return parts.path
+        match = re.fullmatch(r'/repos/([^/]+)/([^/]+)', parts.path)
+        if match:
+            try:
+                target = validate_repository(RepositoryTarget(*match.groups()))
+                if canonical_url(target) == 'https://github.com/' + '/'.join(match.groups()):
+                    return parts.path
+            except (ValueError, TypeError): pass
+        raise error()
+
+    def _validate_transport(self, url, response=None):
+        path = self._metadata_path(url, InvalidTargetError)
+        verify = getattr(self.session, 'verify', True)
+        if not (verify is True or (isinstance(verify, str) and bool(verify))):
+            raise InvalidTargetError()
+        if response is None:
+            headers = getattr(self.session, 'headers', {})
+            if (getattr(self.session, 'params', None) or getattr(self.session, 'cert', None) is not None
+                    or getattr(self.session, 'auth', None) is not None
+                    or any(value is not None and name.lower() in ('authorization', 'cookie', 'proxy-authorization')
+                           for name, value in headers.items())):
+                raise CredentialedSessionError()
+        if response is not None:
+            effective_url = getattr(response, 'url', url)
+            if self._metadata_path(effective_url, UnsafeRedirectError) != path:
+                raise UnsafeRedirectError()
+
+    def _redirect_url(self, location, current):
+        if (type(location) is not str or not location or len(location) > 2048
+                or '?' in location or '#' in location or '\\' in location
+                or any(ord(c) <= 32 or ord(c) >= 127 for c in location)):
+            raise UnsafeRedirectError()
+        url = urljoin(current, location)
+        self._metadata_path(url, UnsafeRedirectError)
+        return url
+
+    def repository(self, target=None, *, repository_id=None):
+        from covearchive.providers import canonical_url, validate_repository
+        if repository_id is not None:
+            if type(repository_id) is not int or not 1 <= repository_id <= 2**63 - 1:
+                raise InvalidTargetError()
+            path = '/repositories/' + str(repository_id)
+        else:
+            target = validate_repository(target)
+            if target.provider != 'github': raise InvalidTargetError()
+            path = '/repos/' + target.owner + '/' + target.repo
+        final, _, body = self._page(API_ROOT + path, self._state)
+        try:
+            def pairs(items):
+                result = {}
+                for key, value in items:
+                    if key in result: raise ValueError('duplicate_metadata')
+                    result[key] = value
+                return result
+            text = body.decode('utf-8'); check_json_depth(text)
+            obj = json.loads(text, object_pairs_hook=pairs,
+                             parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+            if not is_public_repository(obj):
+                raise ValueError()
+            rid, name, owner = obj['id'], obj['name'], obj['owner']['login']
+            if type(rid) is not int or not 1 <= rid <= 2**63 - 1: raise ValueError()
+            canonical = validate_repository(RepositoryTarget(owner, name))
+            if (obj['full_name'] != owner + '/' + name or obj['html_url'] != canonical_url(canonical)
+                    or (repository_id is not None and repository_id != rid)):
+                raise ValueError()
+            final_path = urlsplit(final).path
+            if final_path.startswith('/repositories/'):
+                if final_path != '/repositories/' + str(rid): raise ValueError()
+            elif final_path.casefold() != ('/repos/' + owner + '/' + name).casefold():
+                raise ValueError()
+            return rid, canonical
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError) as exc:
+            raise InvalidResponseError('invalid_repository') from exc
