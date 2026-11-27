@@ -361,7 +361,7 @@ def sync(w):
         w.repository_provider.setText(display_name(repo.provider))
         w.repository_counts.setText(f'{count_text(len(w.tree.model().rows),"release")} · {len(w.eligible)} matching')
     else: w.repository_info.setText('No repository scanned'); w.repository_counts.clear(); w.repository_provider.clear()
-    hidden=sum(r.prerelease for r in w.catalog.releases) if w.catalog and not w.prereleases.isChecked() else 0
+    hidden=sum(r.prerelease and not r.draft for r in w.catalog.releases) if w.catalog and not w.prereleases.isChecked() else 0
     w.hidden_prereleases.setText(count_text(hidden,'prerelease')+' hidden' if hidden else '')
     w.hidden_prereleases.setVisible(bool(hidden)); w.show_prereleases.setVisible(bool(hidden))
     update_chips(w)
@@ -422,6 +422,14 @@ def install_center(w):
     w.center_card.setMaximumWidth(480)
     column.addWidget(w.empty); w.empty.setProperty('stateHeading',True); set_tone(w.empty,'heading')
     w.center_description=label(); set_tone(w.center_description,'muted'); column.addWidget(w.center_description)
+    w.source_archive = QPushButton(w.history_button.text())
+    w.source_update = QPushButton(w.mirror_update.text())
+    for action, original in ((w.source_archive, w.history_button), (w.source_update, w.mirror_update)):
+        action.setAccessibleName(original.accessibleName())
+        action.setAccessibleDescription(original.accessibleDescription())
+        action.setToolTip(original.toolTip())
+        action.clicked.connect(original.click)
+        column.addWidget(action, 0, Qt.AlignHCenter)
     w.examples_panel=QFrame(); w.examples_panel.setProperty('examplePanel',True); examples=QGridLayout(w.examples_panel); examples.setContentsMargins(10,8,10,8)
     w.example_labels=[]; w.example_urls=[]
     for provider,url in (('github','github.com/owner/repository'),('codeberg','codeberg.org/owner/repository'),('gitlab','gitlab.com/group/project')):
@@ -444,7 +452,10 @@ def center_state(w,kind,heading=None):
     shown=kind!='results' and (kind!='result_empty' or w.tree.model().rowCount()==0)
     w.center_overlay.setVisible(shown)
     if kind=='result_empty' and not shown: w.release_meta.setText(heading or '')
-    plain=kind in ('empty','scanning','error')
+    source_only = kind == 'source_only'
+    if source_only and w._compact:
+        w.releases_toggle.setChecked(False)
+    plain=kind in ('empty','scanning','error','source_only')
     w.center_header.setVisible(not plain); w.tree.header().setVisible(not plain)
     loaded=w.catalog is not None
     w.release_list.setVisible(loaded); w.repository_counts.setVisible(loaded); w.repository_provider.setVisible(loaded)
@@ -454,8 +465,13 @@ def center_state(w,kind,heading=None):
         w.hidden_prereleases.hide(); w.show_prereleases.hide()
     w.empty.setVisible(shown)
     w.empty.setText(heading or ('Scanning releases' if kind=='scanning' else 'No repository scanned'))
-    w.center_description.setText('Runs in a separate process. Cancel Scan stops it without touching existing archives.' if kind=='scanning' else 'Paste a repository or releases URL in the toolbar and select Scan. Nothing is scanned automatically.' if kind=='empty' else '')
-    w.center_description.setVisible(kind in ('empty','scanning'))
+    if not source_only:
+        w.center_description.setText('Runs in a separate process. Cancel Scan stops it without touching existing archives.' if kind=='scanning' else 'Paste a repository or releases URL in the toolbar and select Scan. Nothing is scanned automatically.' if kind=='empty' else '')
+    w.center_description.setVisible(kind in ('empty','scanning','source_only'))
+    w.source_archive.setVisible(source_only); w.source_update.setVisible(source_only)
+    if not source_only:
+        w.source_archive.setEnabled(False); w.source_update.setEnabled(False)
+    w.history_button.setVisible(not source_only); w.mirror_update.setVisible(not source_only)
     for example in (*w.example_labels,w.center_shortcuts): example.setVisible(kind=='empty')
     w.examples_panel.setVisible(kind=='empty')
     try:

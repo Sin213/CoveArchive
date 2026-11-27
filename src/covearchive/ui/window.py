@@ -364,7 +364,7 @@ class MainWindow(QMainWindow):
 
         browse_panes.install(self)
         self.tabs.setFocusPolicy(Qt.NoFocus); self.tabs.tabBar().setFocusPolicy(Qt.NoFocus)
-        order=[self.nav,self.url,self.scan,self.cancel,self.queue_chip,self.theme_toggle,self.settings_button,self.filter_toggle,*self.formats.values(),self.prereleases,self.include,self.exclude,self.save_rules,self.releases_toggle,self.release_list,self.show_prereleases,self.select_matching,self.clear_selection,self.tree,self.root,self.browse,self.archive_selected,self.history_button,self.mirror_update,self.mirror_verify,self.history_cancel,self.queue_panel.start,*self.queue_panel.buttons.values(),self.queue_panel.table]
+        order=[self.nav,self.url,self.scan,self.cancel,self.queue_chip,self.theme_toggle,self.settings_button,self.filter_toggle,*self.formats.values(),self.prereleases,self.include,self.exclude,self.save_rules,self.releases_toggle,self.release_list,self.show_prereleases,self.select_matching,self.clear_selection,self.tree,self.root,self.browse,self.archive_selected,self.history_button,self.mirror_update,self.source_archive,self.source_update,self.mirror_verify,self.history_cancel,self.queue_panel.start,*self.queue_panel.buttons.values(),self.queue_panel.table]
         order += [getattr(self.library_panel,name) for name in ('url','add','bulk','import_button','export_button','search','tree','new','rename_collection','delete','table','move','rename','remove','auto_button','open_button')]
         order += self.discover_panel.focus_controls
         for view in (self.tree,self.release_list,self.queue_panel.table,self.library_panel.tree,self.library_panel.table): view.setTabKeyNavigation(False)
@@ -463,16 +463,46 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(0)
         self.url.setFocus()
 
+    def _is_source_only(self):
+        return (self.catalog is not None and self.catalog.complete
+                and all(release.draft for release in self.catalog.releases))
+
+    def _source_history_problem(self, entered):
+        repository = self.catalog.repository
+        try:
+            scanned_url = canonical_url(repository)
+        except (GitHubUrlError, TypeError):
+            return ERRORS["invalid_repository"]
+        # GitHub can follow a move while returning the originally requested repository.
+        if repository.provider == "github" and self.catalog.redirects > 0:
+            return ERRORS["redirect"]
+        if scanned_url.casefold() != self._scan_url.casefold():
+            return "The scan returned a different repository. Scan the intended repository again."
+        if entered is None or entered.repo_key != repository.repo_key:
+            return "Restore the scanned repository URL or scan the new URL."
+        return ""
+
     def _history_enabled(self):
         try: validate_root(self.root.text()); valid=True
         except ValueError: valid=False
         active=self._history_pending or self.history_controller.running
         ready=valid and not active and not self.bridge.shutting_down and not self.bridge.closed and not self._history_closing
-        self.history_button.setEnabled(bool(self.catalog) and ready)
+        entered = self._verify_repository()
+        source_only = self._is_source_only()
+        problem = self._source_history_problem(entered) if source_only else ""
+        self.history_button.setEnabled(bool(self.catalog and self.catalog.complete) and ready and not problem)
         self.mirror_update.setEnabled(self.history_button.isEnabled())
-        self.mirror_verify.setEnabled(ready and self._verify_repository() is not None)
+        self.mirror_verify.setEnabled(ready and entered is not None)
         self.history_cancel.setEnabled(active and not self._history_closing and not self._history_cancelling and getattr(self,'_history_stage',None)!='publishing')
         self.history_cancel.setVisible(active)
+        if source_only:
+            self.source_archive.setEnabled(self.history_button.isEnabled())
+            self.source_update.setEnabled(self.mirror_update.isEnabled())
+            description = "This repository has no published releases. " + (
+                problem or (ERRORS["unsafe_path"] if not valid else "Git history uses the selected archive root."))
+            if self.center_description.text() != description:
+                self.center_description.setText(description)
+                browse_panes.layout_state_card(self)
 
     def _verify_repository(self):
         try: target=parse_repository_url(self.url.text())
@@ -657,14 +687,18 @@ class MainWindow(QMainWindow):
         self.summary.setText(prefix+f"{display(self.catalog.repository.owner)}/{display(self.catalog.repository.repo)} | "
                              f"{browse_panes.count_text(len(selection.releases),'release')} | {browse_panes.count_text(count,'matching asset')}")
         hidden=sum(x.reason=="prerelease" for x in selection.excluded)
-        text = ("No formats selected" if not enabled else "No releases found" if not self.catalog.releases else
+        source_only = self._is_source_only()
+        text = ("No releases found" if source_only else "No formats selected" if not enabled else
                 browse_panes.count_text(hidden,"prerelease")+" hidden" if not selection.releases and hidden else
                 "No matching assets" if not count else "Completed")
         self.empty.setText(text)
         self.empty.setVisible(self.tree.model().rowCount()==0 and self.active_id is None)
         self._status(text)
         browse_panes.sync(self)
-        browse_panes.center_state(self,'result_empty' if not count else 'results',text)
+        if source_only:
+            browse_panes.center_state(self, 'source_only', "Source-only repository")
+        else:
+            browse_panes.center_state(self, 'result_empty' if not count else 'results', text)
 
     def _rule_message(self, text, error=True):
         self.rule_error.setText(text); set_tone(self.rule_error, "error" if error else "success")

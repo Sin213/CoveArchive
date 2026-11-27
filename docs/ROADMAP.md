@@ -21,9 +21,9 @@
 | CA-N1c | Health Dashboard + Check All/Update All | N1a, N1b | COMPLETE |
 | CA-N2a | Scheduled preservation runner | N1a | COMPLETE |
 | CA-N3a | Incremental Git mirrors | — | COMPLETE |
-| CA-N3b | Anonymous GitHub relocation checks and append-only location history | N3a | IN PROGRESS |
-| CA-N4a | Pinned versions + remembered asset selections | — | PLANNED |
-| CA-N4b | Source-only fallback | — | PLANNED |
+| CA-N3b | Anonymous GitHub relocation checks and append-only location history | N3a | COMPLETE (documented exceptions) |
+| CA-N4a | Pinned versions + remembered asset selections | — | DEFERRED |
+| CA-N4b | Source-only fallback | — | IN PROGRESS |
 | CA-N4c | Interrupted-download resume | — | PLANNED |
 | CA-N5a | Self-hosted providers | — | PLANNED |
 
@@ -142,7 +142,7 @@ mirror preference/state are prerequisites; no scheduling capability is claimed.
 N3a is COMPLETE. Native Windows Git-for-Windows, NTFS, GUI and frozen
 onedir/onefile verification remain platform handoff requirements.
 
-## N3b repository relocation history (in progress)
+## N3b repository relocation history (complete with documented exceptions)
 
 Library offers an explicit anonymous **Check repository location** action for
 public GitHub repositories. Numeric repository ids anchor durable observations.
@@ -152,7 +152,7 @@ absence for a lookup. A whole-file snapshot comparison protects append-only
 history from concurrent writes. New locations can be opened in Browse or explicitly
 saved as separate Library entries with Auto-Archive off. Existing archives, Git
 storage and path-based preservation settings stay put.
-See [Repository relocation history](RELOCATION.md). N3b is IN PROGRESS.
+See [Repository relocation history](RELOCATION.md) and the accepted follow-ups below.
 
 ### Deferred enhancements (CA-N3c candidates, not prerequisites for CA-N4a)
 

@@ -700,7 +700,8 @@ def test_r3_browse_result_overlay(ui,kind,expected):
         assert window.preview.text()==('Rules match 0 of 0 eligible assets' if kind=='no_formats' else 'Rules match 0 of 1 eligible assets')
     else:
         assert window.tree.model().rowCount()==0
-        assert window.empty.isVisible() and window.empty.text()==expected
+        heading = 'Source-only repository' if kind == 'no_releases' else expected
+        assert window.empty.isVisible() and window.empty.text()==heading
         assert window.tree.viewport().isAncestorOf(window.empty)
         assert window.tree.viewport().rect().contains(window.empty.mapTo(window.tree.viewport(),window.empty.rect().center()))
     assert window.empty.textFormat()==Qt.PlainText and window.empty.alignment()==Qt.AlignCenter

@@ -12,6 +12,12 @@ Verify Mirror resolves the entered repository/releases URL locally and works
 after a fresh offline start without a successful release scan. It starts only
 on an explicit click; an unavailable upstream cannot disable local verification.
 
+After a complete scan finds zero published releases, Browse shows **Source-only
+repository** with the same manual archive and update actions. Set the archive
+root and choose an action. Both actions require a URL that matches the scanned
+repository. After a GitHub redirect, scan the current canonical URL. Browse
+counts published releases, including prereleases, before applying filters.
+
 Storage is `<project>/git-history/mirror/`: `repository.git/` is a bare reftable
 repository, `identity.json` binds the canonical provider/host/project, and
 `captures/capture-<uuid>.json` is each successful capture's immutable commit
