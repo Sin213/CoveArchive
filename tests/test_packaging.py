@@ -736,10 +736,11 @@ def test_public_notes_and_debian_policy_metadata():
     notes = (ROOT / 'packaging/release-notes.md').read_text()
     assert 'Windows 10 or newer' in notes
     assert 'Planned artifacts' not in notes and 'not available' not in notes
-    for phrase in ('## Discover', 'Discover searches public GitHub only',
+    for phrase in ('Repository Health Dashboard', 'Discover searches public GitHub only',
                    'not proof of authenticity or playability',
                    'does not automatically enable Auto-Archive',
-                   'Auto-Archive operates only while the application is running'):
+                   'explicit confirmation', 'while the window is closed',
+                   'portable onefile executable and the AppImage do not support registration'):
         assert phrase in notes
     control = (ROOT / 'packaging/linux/control.in').read_text()
     assert 'Maintainer: Cove <noreply@covearchive.invalid>' in control
@@ -803,7 +804,7 @@ def test_draft_receipt_refuses_every_mismatch(tmp_path):
     import copy
     module = runpy.run_path(str(ROOT / 'packaging/draft_release.py'))
     expected = {'asset.exe': {'size': 3, 'sha256': 'a' * 64}}
-    good = {'tag_name': 'v1.1.0', 'draft': True, 'target_commitish': 'b' * 40,
+    good = {'tag_name': 'v1.2.0', 'draft': True, 'target_commitish': 'b' * 40,
             'html_url': 'https://example.invalid/draft',
             'assets': [{'name': 'asset.exe', 'size': 3, 'sha256': 'a' * 64}]}
     receipt = tmp_path / 'receipt.json'
@@ -937,8 +938,19 @@ def test_version_metadata_and_artifact_contract():
     installer = (ROOT / 'packaging/windows.iss').read_text()
     assert 'version = runpy.run_path' in spec and '["__version__"]' in spec
     assert 'AppVersion={#AppVersion}' in installer
-    names = runpy.run_path(str(ROOT / 'packaging/draft_release.py'))['NAMES']
-    assert len(names) == 4 and all(__version__ in name for name in names)
+    release = runpy.run_path(str(ROOT / 'packaging/draft_release.py'))
+    image = f'CoveArchive-{__version__}-x86_64.AppImage'
+    deb = f'covearchive_{__version__}_amd64.deb'
+    names = release['NAMES']
+    assert names == {f'CoveArchive-{__version__}-Setup.exe',
+                     f'CoveArchive-{__version__}-Portable.exe', image, deb}
+    assert release['TAG'] == f'v{__version__}'
+    workflow = (ROOT / '.github/workflows/release.yml').read_text()
+    assert f'  group: covearchive-{release["TAG"]}-draft' in workflow.splitlines()
+    linux_ci = (ROOT / 'packaging/linux/ci.sh').read_text()
+    assert f'image="$PWD/dist/release/{image}"' in linux_ci
+    assert f'apt-get install -y xvfb /artifacts/{deb}\n' in linux_ci
+    assert f'sha256sum {image} {deb} > linux.sha256' in linux_ci
     notes = (ROOT / 'packaging/release-notes.md').read_text()
     assert all(name in notes for name in names)
     assert 'Each artifact has a matching `<artifact>.sha256` file' in notes
@@ -1003,7 +1015,7 @@ def test_draft_orchestration_never_replaces_assets(tmp_path, monkeypatch, mode, 
                 for name, data in contents.items()}
     assert len(expected) == 8
     calls = []; downloads = []
-    state = dict(id=1, tag_name='v1.1.0', draft=True, target_commitish='a' * 40,
+    state = dict(id=1, tag_name='v1.2.0', draft=True, target_commitish='a' * 40,
                  html_url='https://example.invalid/draft', assets=[])
     exists = mode in ('reuse-empty', 'reused', 'wrong-commit', 'published')
     if mode == 'reused': state['assets'] = [dict(id=7, name=sorted(names)[0], size=1)]
@@ -1013,17 +1025,18 @@ def test_draft_orchestration_never_replaces_assets(tmp_path, monkeypatch, mode, 
 
     def fake_api(endpoint):
         if '/git/matching-refs/' in endpoint:
-            return [{'ref': 'refs/tags/v1.1.0'}] if mode == 'tag-exists' else []
+            return [{'ref': 'refs/tags/v1.2.0'}] if mode == 'tag-exists' else []
         assert endpoint.endswith('/releases/1'); return copy.deepcopy(state)
 
     def fake_command(*args):
         nonlocal exists
         calls.append(args)
         if args[1:3] == ('release', 'create'):
+            assert args[3] == 'v1.2.0' and args[args.index('--title') + 1] == 'CoveArchive 1.2.0'
             assert '--draft' in args and args[args.index('--target') + 1] == 'a' * 40
             exists = True; return b''
         if args[1:3] == ('release', 'upload'):
-            assert args[3] == 'v1.1.0'
+            assert args[3] == 'v1.2.0'
             assert args[4:] == tuple(str(inputs / name) for name in sorted(expected))
             assert {Path(path).name for path in args[4:]} == names | {name + '.sha256' for name in names}
             assert all(Path(path).read_bytes() == contents[Path(path).name] for path in args[4:])

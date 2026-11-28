@@ -23,8 +23,8 @@
 | CA-N3a | Incremental Git mirrors | — | COMPLETE |
 | CA-N3b | Anonymous GitHub relocation checks and append-only location history | N3a | COMPLETE (documented exceptions) |
 | CA-N4a | Pinned versions + remembered asset selections | — | DEFERRED |
-| CA-N4b | Source-only fallback | — | IN PROGRESS |
-| CA-N4c | Interrupted-download resume | — | PLANNED |
+| CA-N4b | Source-only fallback | — | COMPLETE |
+| CA-N4c | Interrupted-download resume | — | DEFERRED |
 | CA-N5a | Self-hosted providers | — | PLANNED |
 
 ## N1a foundation contract

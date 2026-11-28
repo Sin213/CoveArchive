@@ -31,8 +31,9 @@ are not downloadable assets in this workflow.
 | Feature | GitHub | Codeberg | GitLab.com |
 | --- | --- | --- | --- |
 | Browse, filters, release archiving and Queue | Yes | Yes | Yes |
-| Manual Archive Git History | Yes | Yes | Yes |
-| Save Rules, active Library entries and Auto-Archive | Yes | No | No |
+| Manual Git bundles and incremental mirrors | Yes | Yes | Yes |
+| Save Rules, active Library entries and automatic release preservation | Yes | No | No |
+| Repository Health Dashboard and relocation checks | Yes | No | No |
 
 Imported non-GitHub Library entries can remain in the list as inactive metadata.
 Browse support for Codeberg and GitLab does not make those Library entries active.
@@ -43,7 +44,7 @@ Browse support for Codeberg and GitLab does not make those Library entries activ
 - `requests` and PySide6, installed by the commands below.
 - A Windows desktop session, or a Linux desktop session with Wayland or X11.
 - An existing, absolute local archive directory with enough free space.
-- Git 2.45 or newer on `PATH` only if you want Git-history bundles.
+- Git 2.45 or newer on `PATH` for Git bundles and mirrors.
 
 On Windows, the archive destination must be on a local NTFS volume.
 On Linux, use a local filesystem that supports hard links and provides access
@@ -162,10 +163,28 @@ Auto-Archive enablement. Imported retention settings do not authorize deletion.
 
 Removing Library entries or deleting collections does not delete archives.
 
+**Discover** searches public GitHub for emulators, recompilations, native ports
+and decomps. Open results in Browse or save them to Library collections.
+
+### Check repository health and location
+
+Open Library's **Health** view and use **Check Selected** or **Check All** to
+check upstream availability, compare the latest releases with the archive and
+verify archived files and metadata. These checks are read-only. **Update All**
+prepares eligible updates using saved rules and queues downloads only after
+explicit confirmation.
+
+Use **Check repository location** in Library to look for GitHub renames, owner
+transfers and reused URLs. Verified locations can be opened in Browse or saved
+as separate Library entries. Archives and preservation settings stay at their
+original paths. See the [relocation guide](docs/RELOCATION.md) and the
+[CA-N3b review exceptions](docs/ROADMAP.md#n3b-repository-relocation-history-complete-with-documented-exceptions),
+including inconclusive results for tracked aliases and retries after concurrent
+history changes.
+
 ### Opt in to automatic release checks
 
-Auto-Archive is **off by default**, applies only to active GitHub Library entries,
-and runs only while the application window is open.
+Auto-Archive is **off by default** and applies to active GitHub Library entries.
 
 To enable it:
 
@@ -174,17 +193,21 @@ To enable it:
 3. Select the repository in Library, choose **Auto-Archive...**, and select an
    interval: **1, 6, 12 or 24 hours**.
 
-The first check waits for the selected interval. Reopening the application
-starts a fresh interval; there is no closed-window catch-up service.
-Checks use the saved rules and current saved archive destination to enqueue
-eligible release assets through the normal queue. Completed jobs are not
-automatically requeued.
+While the window is open, the first Auto-Archive check waits for the selected
+interval. Reopening the application starts a fresh interval. Checks use the
+saved rules and archive destination to enqueue eligible assets through the
+normal queue. Completed jobs are not automatically requeued. Turning off
+Auto-Archive stops future checks and leaves queued jobs and archives in place.
 
-Auto-Archive only scans and enqueues; the normal queue performs downloads and
-verification and may start under the rules described above. It does not create
-Git-history bundles. Turning it off stops future checks and leaves queued jobs
-and archived files in place. There is no background service, tray agent or
-scheduler daemon.
+To preserve releases while the window is closed, separately enable **Scheduled
+preservation** in Settings. The OS scheduler runs anonymous checks for repositories
+with Auto-Archive enabled and uses the same queue and archive rules. Before
+downloading, it audits the local archive and stops for attention if the audit
+finds damage or cannot complete. Windows task registration requires a logged-in
+user and a stable executable, as provided by the installed onedir build. Linux
+registration needs a working systemd user manager and a stable installation
+path. The Windows portable onefile executable and Linux AppImage do not support
+registration. See the [scheduled preservation guide](docs/SCHEDULED_PRESERVATION.md).
 
 ## Preservation and archive layout
 
@@ -219,6 +242,10 @@ A project contains:
     snapshot-<UTC timestamp>--<reference digest>/
       history.bundle
       history.json
+    mirror/
+      repository.git/
+      identity.json
+      captures/
 ```
 
 `archive-index.json` records project identity, release folders and saved names.
@@ -226,17 +253,21 @@ A project contains:
 completion state. Assets sit beside `release.json`. The optional `git-history`
 directory appears when you archive Git history.
 
-**Non-deletion guarantee:** CoveArchive never deletes archived release files or
-Git-history snapshots. Upstream removal of releases or assets, changes to filters
-or settings, Library removal and disabling Auto-Archive do not delete them.
-Snapshots are never pruned automatically; deleting archived files or snapshots
-is your choice. Internal temporary files may be cleaned up.
+**Non-deletion guarantee.** CoveArchive never automatically deletes archived
+files, historical releases, Git snapshots or preserved Git refs. Upstream
+changes, changes to filters or settings, Library removal and disabling
+preservation leave them in place. Internal temporary files may be cleaned up.
 
 Metadata and queue formats are versioned. Builds that encounter newer schemas
 they do not understand refuse to use them; do not assume an older build can
 reopen data written by a newer one.
 
 ## Optional: archive Git history
+
+After a complete Browse scan finds zero published releases, the **Source-only
+repository** view offers **Archive Git History** and **Update Git Mirror**.
+Choose an archive destination and start either action explicitly. Keep the
+scanned URL in Browse. After a GitHub redirect, scan the canonical URL first.
 
 After scanning a supported repository and choosing a destination, select
 **Archive Git History** explicitly. This manual action requires Git 2.45 or newer
@@ -267,6 +298,12 @@ names differing only by case or reserved device names like `aux`.
 These checks validate Git structure; compare the bundle's SHA-256 with
 `history.json` separately if you need to check the saved file against its manifest.
 
+Use **Update Git Mirror** for incremental captures in a persistent bare Git
+repository. It preserves earlier branches and tags when upstream rewrites or
+deletes them. **Verify Mirror** works offline. Use the documented export API and
+Git to restore a selected capture offline. Mirror updates are manual. Scheduled
+Git mirror preservation is deferred. See the [Git mirrors guide](docs/GIT_MIRRORS.md).
+
 ## Optional GitHub token
 
 Anonymous access works without a token. Add or clear an optional GitHub token
@@ -295,6 +332,9 @@ CoveArchive uses the token only for repositories GitHub reports public via one a
 | Linux | `$XDG_CONFIG_HOME/covearchive/preferences.json` and `library.json`; default `<user home>/.config/covearchive/` | `$XDG_STATE_HOME/covearchive/queue.sqlite3`; default `<user home>/.local/state/covearchive/` |
 
 Relative XDG directory values are ignored in favor of the defaults.
+Relocation history lives beside the Library, and scheduled preservation state
+lives beside the queue. The Windows portable executable uses the same per-user
+data locations as the installer. Uninstalling leaves user data and archives in place.
 Keep local data and archives together in your own backup plan if you want to
 preserve both the saved files and application organization.
 
@@ -325,8 +365,11 @@ atomic replacement or protection against concurrent external modification.
 - Repository and release-list inputs only; no individual tag URLs in the UI.
 - Provider rate limits, network failures and bounded scans can delay or prevent
   discovery or downloads; very large scans may time out.
-- No background operation while the window is closed and no byte-level resume.
-- Git bundles omit LFS file contents, submodule contents and PR/MR refs.
+- Byte-level interrupted-download resume, version pinning and remembered asset
+  selections are deferred.
+- Git preservation omits LFS file contents, submodule contents and refs outside
+  the advertised branches and tags.
+- Packaged binaries are unsigned. Windows SmartScreen or antivirus may warn.
 - Windows and Linux source use is covered here; macOS support is not claimed.
 
 ## License
