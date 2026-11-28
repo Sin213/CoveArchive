@@ -68,6 +68,19 @@ class SaveDiscoveredOutcome(Enum):
     SAVE_FAILED = auto()
 
 
+class _RepositoryTable(W.QTableView):
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        # Keep two rows visible when the relocation inspector needs to scroll.
+        # Reserve room for the horizontal scrollbar even if it is currently hidden.
+        height = (2 * self.verticalHeader().defaultSectionSize()
+                  + self.horizontalHeader().sizeHint().height()
+                  + self.horizontalScrollBar().sizeHint().height()
+                  + 2 * self.frameWidth())
+        hint.setHeight(max(100, hint.height(), height))
+        return hint
+
+
 class LibraryPanel(W.QWidget):
     changed=Signal()
     open_requested=Signal(str)
@@ -118,7 +131,7 @@ class LibraryPanel(W.QWidget):
         self.new = button("New", self._new, folders); self.rename_collection = button("Rename", self._rename_collection, folders)
         self.delete = button("Delete", self._delete, folders)
         folders.addStretch()
-        self.table = W.QTableView(); self.table.setObjectName("repositoryTable"); self.table.setMinimumHeight(100); self.table.setTextElideMode(Qt.ElideRight); self.model = RepositoryModel(self); self.model.rows = (); self.model.labels = []
+        self.table = _RepositoryTable(); self.table.setObjectName("repositoryTable"); self.table.setTextElideMode(Qt.ElideRight); self.model = RepositoryModel(self); self.model.rows = (); self.model.labels = []
         self.table.setModel(self.model); self.table.setSelectionBehavior(W.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(W.QAbstractItemView.ExtendedSelection); self.table.verticalHeader().hide()
         self.table.verticalHeader().setSectionResizeMode(W.QHeaderView.Fixed); self.table.verticalHeader().setDefaultSectionSize(self.table.fontMetrics().height()+12)
